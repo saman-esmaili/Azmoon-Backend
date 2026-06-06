@@ -4,7 +4,10 @@ import jdatetime
 
 def calc_exam_status(exm_date,exm_time,start_time):
     if isinstance(exm_date,str):
-        exm_date = jdatetime.datetime.strptime(exm_date,"%Y-%m-%d").date()
+        try:
+            exm_date = jdatetime.datetime.strptime(exm_date,"%Y-%m-%d").date()
+        except:
+            exm_date = jdatetime.datetime.strptime(exm_date, "%Y/%m/%d").date()
     elif not isinstance(exm_date, jdatetime.date):
         exm_date = jdatetime.date(exm_date.year, exm_date.month, exm_date.day)
     if isinstance(start_time,str):

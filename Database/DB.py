@@ -39,6 +39,7 @@ class SpcField(str,Enum):
     humanities= 'علوم انسانی'
     mathemetics= 'ریاضی فیزیک'
     foreign= 'زبان های خارجی'
+    others= 'سایر'
 
 class Teacher(SQLModel,table=True):
     id: int = Field(primary_key=True)
@@ -162,7 +163,7 @@ class Exam(SQLModel,table=True):
     start_time: time = Field()
     exam_time: int = Field()
     # graded: bool = Field()
-    question_number: int = Field(gt=0)
+    # question_number: int = Field(gt=0)
     order_type: ORDER = Field(default=ORDER.ordered)
     description: Optional[str] = Field(min_length=4,max_length=200)
     score: int = Field()
@@ -213,13 +214,14 @@ class Difficulties(str,Enum):
 
 class Question(SQLModel,table=True):
     id: int = Field(primary_key=True)
-    question: str = Field(min_length=4,max_length=350)
+    question: str = Field(None,max_length=350)
     question_date: date = Field()
     type: QUE_TYPES = Field(default=QUE_TYPES.test)
     score: float = Field(gt=0)
     category: str = Field()
     difficulty: str = Field(default=Difficulties.easy)
     image: Optional[str] = Field(None)
+    true_answer: str = Field()
     teacher_id: int = Field(ForeignKey('teacher.id'))
 
 class UpdateQuestion(Question):
@@ -246,15 +248,14 @@ class UpdateStudentExam(StudentExam):
 
 class TestQuestion(SQLModel,table=True):
     id: int = Field(primary_key=True)
-    A: str = Field()
+    A: Optional[str] = Field(None)
     A_image: Optional[str] = Field(None)
-    B: str = Field()
+    B: Optional[str] = Field(None)
     B_image: Optional[str] = Field(None)
-    C: str = Field()
+    C: Optional[str] = Field(None)
     C_image: Optional[str] = Field(None)
-    D: str = Field()
+    D: Optional[str] = Field(None)
     D_image: Optional[str] = Field(None)
-    # true_answer: str = Field(max_length=1,min_length=1)
     question_id: int = Field(ForeignKey('question.id'))
 
 

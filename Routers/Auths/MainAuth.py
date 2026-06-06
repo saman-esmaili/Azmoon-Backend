@@ -13,8 +13,8 @@ from sqlalchemy import select
 from sqlmodel import Field
 from starlette import status
 from starlette.responses import JSONResponse
-from Database.DB import User, sessionDep, Teacher, Student, StudentClass
-from Dependencies.Hashing import hash_token, hash_pass
+from Database.DB import User, sessionDep, Teacher, Student, StudentClass, Admin, Class
+from Dependencies.Hashing import hash_token, hash_pass, verify_pass
 from Dependencies.Redis import r
 import os
 from Dependencies.Tasks import auth_scheme, generate_code
@@ -37,7 +37,7 @@ class MobileUser(BaseModel):
     type: str
 
 @router.post('/send-otp')
-async def send_otp(mobile:Annotated[MobileUser,Body()],Admin:Annotated[str | None,Query()]=None):
+async def send_otp(mobile:Annotated[MobileUser,Body()],session:sessionDep,Admin:Annotated[str | None,Query()]=None,class_url:Annotated[str | None,Query()]=None):
     try:
         exist_code = r.get(f'OTP:{mobile.mobile}')
         if not exist_code:
@@ -46,8 +46,11 @@ async def send_otp(mobile:Annotated[MobileUser,Body()],Admin:Annotated[str | Non
             code = exist_code.decode('utf-8')
         # send code by sms panel
         print(code)
-        if Admin:
-            await admin_user(Admin,mobile,session=sessionDep)
+        if class_url:
+            r.setex(f'class_mobile:{mobile.mobile}',500,class_url)
+
+        if Admin and Admin != 'null':
+            await admin_user(Admin,mobile,session=session)
             r.set(f'TYPE:{mobile.mobile}', 'admin', ex=200)
         else:
             r.set(f'TYPE:{mobile.mobile}',mobile.type,ex=200)
@@ -59,9 +62,9 @@ async def send_otp(mobile:Annotated[MobileUser,Body()],Admin:Annotated[str | Non
 
 
 async def admin_user(Admin,mobile,session):
-    password = Admin[3:]
-    hashed_pass = hash_pass(password)
-    is_admin = session.query(User).filter(User.mobile==mobile,User.password==hashed_pass,User.type=='admin').first()
+    admin = session.query(User).filter(User.mobile == mobile.mobile).first()
+    password = admin.password
+    is_admin = verify_pass(Admin,password)
     if is_admin:
         return 'admin'
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,detail='Mobile Incorrect')
@@ -71,13 +74,14 @@ class UserCode(BaseModel):
     code: str = Field(min_length=5,max_length=5)
     mobile: str = Field(max_length=11, min_length=11,regex=r'^09[0-3,9]\d{8}$')
 
-@router.post('/verify-code')
+@router.post('/verify-code/')
 async def verify_code(user_code:Annotated[UserCode,Body()],session:sessionDep):
     try:
         original_code = (r.get(f'OTP:{user_code.mobile}')).decode('utf-8')
         if original_code == user_code.code:
+            user_type = (r.get(f'TYPE:{user_code.mobile}')).decode('utf-8')
             raw_refresh,access_token =  await check_user_exist(user_code.mobile,session)
-            response = JSONResponse(content={'message':'login successful'})
+            response = JSONResponse(content={'role':user_type})
             response.set_cookie(
                 key='access_token',
                 value=access_token,
@@ -111,6 +115,8 @@ async def check_user_exist(mobile,session):
             is_exist_type = session.query(Student).filter(Student.user_id==user_id).first()
         elif user_type == 'teacher':
             is_exist_type = session.query(Teacher).filter(Teacher.user_id==user_id).first()
+        else:
+            is_exist_type = session.query(Admin).filter(Admin.user_id == user_id).first()
 
         if is_exist_type:
             return await login(user_id,session)
@@ -253,8 +259,9 @@ async def authorization(token: Annotated[str, Depends(get_access_token)]):
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail='Invalid Token')
 
-async def save_class(class_id,user_id,session):
+async def save_class(class_url,user_id,session):
     student_id = session.query(Student).filter(Student.user_id==user_id).first().id
+    class_id = session.query(Class).filter(Class.signup_link==class_url).first().id
     student_class = StudentClass(
         student_id=student_id,
         class_id=class_id,
@@ -280,6 +287,10 @@ async def logout(raw_refresh:Annotated[str,Header()]):
 @router.post('/revoke')
 async def revoke(access_token: Annotated[str | None, Cookie()] = None,refresh_token: Annotated[str | None, Cookie()] = None):
     hash_refresh = hash_token(refresh_token)
+    user_id = r.get(hash_refresh)
     r.delete(hash_refresh)
     r.delete(access_token)
+    r.delete(f'teacher-types{user_id}')
+    r.delete(f'admin-types{user_id}')
+    r.delete(f'student-types{user_id}')
     return {'revoke_status':'ok'}

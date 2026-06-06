@@ -3,7 +3,7 @@ import json
 import os
 import shutil
 import uuid
-from pathlib import Path
+from pathlib import Path as pth
 from typing import Annotated, Optional
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.params import Body, Depends, Path, Form, File
@@ -18,9 +18,11 @@ from Database.DB import sessionDep, QUE_TYPES, Difficulties, Question, TestQuest
     EssayQuestion
 
 router = APIRouter(prefix='/teacher/question')
+IMAGE_FORMAT = ["jpeg", "jpg", "png", "webp"]
+
 
 class QuestionItem(BaseModel):
-    question: str = Field(min_length=4, max_length=350)
+    question: str = Field(None, max_length=350)
     type: QUE_TYPES = Field(default=QUE_TYPES.test)
     score: float = Field(gt=0)
     category: str = Field()
@@ -31,28 +33,45 @@ class QuestionItem(BaseModel):
     d: Optional[str] = Field(None)
     true_answer: Optional[str] = Field(None)
 
-async def generate_image_name(teacher_id,old_name):
-    image_name,image_format = old_name.split('.')
-    new_name = f"{teacher_id}_{uuid.uuid4()}_{image_name}"
+
+async def generate_image_name(teacher_id, old_name):
+    image_name = old_name.split('.')
+    image_format = image_name[-1]
+    if image_format not in IMAGE_FORMAT:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    new_name = f"{timestamp}{teacher_id}_{uuid.uuid4()}"
     return f'{new_name}.{image_format}'
 
-async def save_image(path,teacher_id,image:UploadFile):
-    new_name = await generate_image_name(teacher_id,image.filename)
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+async def save_image(path, teacher_id, image: UploadFile):
+    new_name = await generate_image_name(teacher_id, image.filename)
+    BASE_DIR = os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))
+        )
+    )
     file_path = f'{BASE_DIR}/{path}/{new_name}'
-    with open(file_path,'wb') as f:
-        shutil.copyfileobj(image.file,f)
+    with open(file_path, 'wb') as f:
+        shutil.copyfileobj(image.file, f)
     return new_name
 
-async def remove_image(image_name,path):
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    file_path = Path(f'{current_dir}/{path}/{image_name}')
+
+async def remove_image(image_name, path):
+    BASE_DIR = os.path.dirname(
+        os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))
+        )
+    )
+    file_path = pth(f'{BASE_DIR}/{path}/{image_name}')
     if file_path.exists():
         os.remove(file_path)
 
+
 @router.post('/add')
-async def add_question(session:sessionDep,user_types:Annotated[get_teacher,Depends()],question_data:Annotated[str,Form()],
-                       question_image:Annotated[UploadFile | None, File()] = None,
+async def add_question(session: sessionDep, user_types: Annotated[get_teacher, Depends()],
+                       question_data: Annotated[str, Form()],
+                       question_image: Annotated[UploadFile | None, File()] = None,
                        A_image: Annotated[UploadFile | None, File()] = None,
                        B_image: Annotated[UploadFile | None, File()] = None,
                        C_image: Annotated[UploadFile | None, File()] = None,
@@ -63,17 +82,17 @@ async def add_question(session:sessionDep,user_types:Annotated[get_teacher,Depen
     teacher_id = (user_types['teacher']).decode('utf-8')
 
     if question_image:
-        image_name = await save_image('Question',teacher_id,question_image)
+        image_name = await save_image('Questions', teacher_id, question_image)
     else:
         image_name = None
 
-
+    print(items.difficulty)
     q = Question(
         question=items.question,
         type=items.type,
         score=items.score,
         category=items.category,
-        dfficulty=items.difficulty,
+        difficulty=items.difficulty,
         teacher_id=teacher_id,
         question_date=datetime.datetime.now().date(),
         true_answer=items.true_answer,
@@ -85,36 +104,30 @@ async def add_question(session:sessionDep,user_types:Annotated[get_teacher,Depen
     q_id = q.id
     try:
         if items.type == QUE_TYPES.test:
-            await add_test_question(session,teacher_id,q_id,items.a,items.b,items.c,items.d,A_image,B_image,C_image,D_image)
+            await add_test_question(session, teacher_id, q_id, items.a, items.b, items.c, items.d, A_image, B_image,
+                                    C_image, D_image)
         elif items.type == QUE_TYPES.essay:
-            await add_essay_question(session,teacher_id,q_id,essay_image)
+            await add_essay_question(session, teacher_id, q_id, essay_image)
     except:
-        selected_question = session.query(Question).filter(Question.id==q_id)
-        await remove_image(selected_question.image,'Question')
+        selected_question = session.query(Question).filter(Question.id == q_id)
+        image = selected_question.first().image
+        await remove_image(image, 'Questions')
         session.delete(selected_question)
         session.commit()
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
-    return JSONResponse(content={'status':'ok'},status_code=status.HTTP_201_CREATED)
+    return JSONResponse(content={'status': 'ok'}, status_code=status.HTTP_201_CREATED)
 
 
-async def add_test_question(session,teacher_id,q_id,a,b,c,d,a_image,b_image,c_image,d_image):
-    if a_image:
-        a_image_name = await save_image('Question', teacher_id, a_image)
-    else:
-        a_image_name = None
-    if b_image:
-        b_image_name = await save_image('Question', teacher_id, a_image)
-    else:
-        b_image_name = None
-    if c_image:
-        c_image_name = await save_image('Question', teacher_id, a_image)
-    else:
-        c_image_name = None
-
-    if d_image:
-        d_image_name = await save_image('Question', teacher_id, a_image)
-    else:
-        d_image_name = None
+async def add_test_question(session, teacher_id, q_id, a, b, c, d, a_image, b_image, c_image, d_image):
+    images = [a_image, b_image, c_image, d_image]
+    names = ['A', 'B', 'C', 'D']
+    dict = {}
+    for name, img in zip(names, images):
+        if img:
+            image_name = await save_image('Questions', teacher_id, img)
+        else:
+            image_name = None
+        dict[name] = image_name
 
     test_q = TestQuestion(
         A=a,
@@ -122,18 +135,19 @@ async def add_test_question(session,teacher_id,q_id,a,b,c,d,a_image,b_image,c_im
         C=c,
         D=d,
         question_id=q_id,
-        A_image=a_image_name,
-        B_image=b_image_name,
-        C_image=c_image_name,
-        D_image=d_image_name
+        A_image=dict['A'],
+        B_image=dict['B'],
+        C_image=dict['C'],
+        D_image=dict['D']
     )
     session.add(test_q)
     session.commit()
     session.refresh(test_q)
 
-async def add_essay_question(session,teacher_id,q_id,essay_image:UploadFile):
+
+async def add_essay_question(session, teacher_id, q_id, essay_image: UploadFile):
     if essay_image:
-        image_name = await save_image('Question', teacher_id, essay_image)
+        image_name = await save_image('Questions', teacher_id, essay_image)
     else:
         image_name = None
     essay_question = EssayQuestion(
@@ -143,130 +157,175 @@ async def add_essay_question(session,teacher_id,q_id,essay_image:UploadFile):
     session.add(essay_question)
     session.commit()
     session.refresh(essay_question)
-@router.get('')
-async def show_question(session:sessionDep,user_types:Annotated[get_teacher,Depends()]):
 
+
+@router.get('')
+async def show_question(session: sessionDep, user_types: Annotated[get_teacher, Depends()]):
     teacher_id = (user_types['teacher']).decode('utf-8')
     use = select(
         QuestionExam.exam_id.label('exam_id'),
         func.count(func.distinct(QuestionExam.exam_id)).label('count_use')
     ).group_by(QuestionExam.exam_id).subquery()
     header = {}
-    use_q = (session.query(Class,Exam,use.c.count_use)
-             .filter(Class.teacher_id==teacher_id)
-             .outerjoin(Exam,Exam.class_id==Class.id)
-             .outerjoin(use,use.c.exam_id==Exam.id)
-             .with_entities(func.coalesce(use.c.count_use, 0).label('count_use'))
-             )
-    header['use_count'] = use_q.count_use
+    use_q = (
+        session.query(
+            func.coalesce(func.sum(use.c.count_use), 0)
+        )
+        .select_from(Class)
+        .filter(Class.teacher_id == teacher_id)
+        .outerjoin(Exam, Exam.class_id == Class.id)
+    )
+
+    header['use_count'] = int(use_q.scalar() or 0)
     questions = session.query(
         Question,
         TestQuestion,
-        func.sum(case((Question.type == QUE_TYPES.test, 1), else_=0)).label('count_test'),
-        func.sum(case((Question.type == QUE_TYPES.essay, 1), else_=0)).label('count_essay'),
-        func.sum(case((Question.type == QUE_TYPES.true_false, 1), else_=0)).label('count_true_false')
+        EssayQuestion
     ).filter(
         Question.teacher_id == teacher_id
     ).outerjoin(
         TestQuestion, TestQuestion.question_id == Question.id
-    ).group_by(
-        Question.id
+    ).outerjoin(
+        EssayQuestion, EssayQuestion.question_id == Question.id
     )
     result = []
-
-    count = 1
-    for q,tq,ct,ce,ctf in questions:
-        if count == 1:
-            header['test_count'] = ct
-            header['essay_count'] = ce
-            header['true_false_count'] = ctf
-            header['all'] = ct+ce+ctf
-            count+=1
-        dic_res ={'id': q.id, 'question': q.question, 'score': q.score, 'category': q.category,
-            'difficulty': q.difficulty,'type':q.type,'true_answer':q.true_answer}
+    for q, tq, eq in questions:
+        dic_res = {'id': q.id, 'text': q.question, 'score': float(q.score), 'cat': q.category,
+                   'diff': q.difficulty, 'type': q.type, 'true_answer': q.true_answer, 'question_image': q.image}
         if tq:
-            dic_res.update({'A':tq.A,'B':tq.B,'C':tq.C,'D':tq.D})
+            dic_res.update({'A': tq.A, 'B': tq.B, 'C': tq.C, 'D': tq.D, 'A_image': tq.A_image, 'B_image': tq.B_image,
+                            'C_image': tq.C_image, 'D_image': tq.D_image})
+        if eq:
+            dic_res.update({'essay_image': eq.essay_image})
         result.append(dic_res)
-    return JSONResponse(content={'questions':result,'questions_info':header})
+    header['length'] = len(result)
+    return JSONResponse(content={'questions': result, 'questions_info': header})
 
+
+async def check_image(past_image_name, new_image_name, teacher_id):
+    if not past_image_name and not new_image_name:
+        return None
+    elif past_image_name and not new_image_name:
+        await remove_image(past_image_name, 'Questions')
+        return None
+    elif new_image_name and not past_image_name:
+        new = await save_image('Questions', teacher_id, new_image_name)
+        return new
+    else:
+        if new_image_name == past_image_name:
+            return new_image_name
+        else:
+            await remove_image(past_image_name, 'Questions')
+            new = await save_image('Questions', teacher_id, new_image_name)
+            return new
+
+
+
+class EditQuestionItem(BaseModel):
+    question: str = Field(None, max_length=350)
+    type: QUE_TYPES = Field(default=QUE_TYPES.test)
+    score: float = Field(gt=0)
+    category: str = Field()
+    difficulty: str = Field(default=Difficulties.easy)
+    a: Optional[str] = Field(None)
+    b: Optional[str] = Field(None)
+    c: Optional[str] = Field(None)
+    d: Optional[str] = Field(None)
+    true_answer: Optional[str] = Field(None)
+    q_prev_image: Optional[str] = Field(None)
+    essay_prev: Optional[str] = Field(None)
+    a_prev: Optional[str] = Field(None)
+    b_prev: Optional[str] = Field(None)
+    c_prev: Optional[str] = Field(None)
+    d_prev: Optional[str] = Field(None)
 
 @router.put('/edit/{question_id}')
-async def edit_question(items:Annotated[QuestionItem,Body()],session:sessionDep,user_types: Annotated[get_teacher, Depends()],question_id:Annotated[int,Path()]):
+async def edit_question(session: sessionDep,user_types: Annotated[get_teacher, Depends()], question_id: Annotated[int, Path()],question_data: Annotated[str, Form()],
+                       question_image: Annotated[UploadFile | None, File()] = None,
+                       A_image: Annotated[UploadFile | None, File()] = None,
+                       B_image: Annotated[UploadFile | None, File()] = None,
+                       C_image: Annotated[UploadFile | None, File()] = None,
+                       D_image: Annotated[UploadFile | None, File()] = None,
+                       essay_image: Annotated[UploadFile | None, File()] = None,):
     teacher_id = (user_types['teacher']).decode('utf-8')
-    selected_question = session.query(Question).filter(Question.id==question_id)
+    items = EditQuestionItem(**json.loads(question_data))
+    selected_question = session.query(Question).filter(Question.id == question_id)
+    select_q = selected_question.first()
+    q_img = question_image if question_image else (items.q_prev_image).split('/')[-1] if items.q_prev_image else None
+    new_name = await check_image(select_q.image, q_img, teacher_id)
     question_val = {
-        'question':items.question,
-        'score':items.score,
-        'type':items.type,
-        'category':items.category,
-        'difficulty':items.difficulty,
+        'question': items.question,
+        'score': items.score,
+        'type': items.type,
+        'category': items.category,
+        'difficulty': items.difficulty,
+        'true_answer': items.true_answer,
+        'image': new_name
     }
 
     if items.type == QUE_TYPES.test:
-        selected_type_question = session.query(TestQuestion).filter(TestQuestion.question_id==question_id)
+        selected_type_question = session.query(TestQuestion).filter(TestQuestion.question_id == question_id)
+        selected_q = selected_type_question.first()
+        past_image_name = [selected_q.A_image, selected_q.B_image, selected_q.C_image, selected_q.D_image]
+        new_image_name = [A_image, B_image, C_image, D_image]
+        prev_image_name = [items.a_prev, items.b_prev, items.c_prev, items.d_prev]
+        names = ['A_image', 'B_image', 'C_image', 'D_image']
+        res_dict = {}
+        for name, past, new,prv in zip(names, past_image_name, new_image_name,prev_image_name):
+            test_img = new if new else prv.split('/')[-1] if prv else None
+            test_name = await check_image(past, test_img, teacher_id)
+            res_dict[name] = test_name
         type_val = {
             'A': items.a,
             'B': items.b,
             'C': items.c,
             'D': items.d,
-            'true_answer':items.true_test
         }
-    elif items.type == QUE_TYPES.true_false:
-        selected_type_question = session.query(TrueFalseQuestion).filter(TrueFalseQuestion.question_id==question_id)
+        type_val.update(res_dict)
+    elif items.type == QUE_TYPES.essay:
+        selected_type_question = session.query(EssayQuestion).filter(EssayQuestion.question_id == question_id)
+        select_essay = selected_type_question.first()
+        choose_essay_img = essay_image if essay_image else items.essay_prev.split('/')[-1] if items.essay_prev else None
+        essay_img = await check_image(select_essay.essay_image, choose_essay_img, teacher_id)
         type_val = {
-            'true_answer': items.true_false
+            'essay_image': essay_img
         }
     else:
-        selected_type_question = session.query(EssayQuestion).filter(EssayQuestion.question_id==question_id)
-        type_val = {
-            'true_answer': items.text_answer
-        }
+        selected_type_question = None
     update_question = selected_question.update(question_val)
-    update_type = selected_type_question.update(type_val)
+    if selected_type_question:
+        update_type = selected_type_question.update(type_val)
     session.commit()
-    return JSONResponse(content={'status':'updated'},status_code=status.HTTP_200_OK)
+    return JSONResponse(content={'status': 'updated'}, status_code=status.HTTP_200_OK)
+
 
 @router.delete('/delete/{question_id}')
-async def delete_question(session:sessionDep,question_id:Annotated[int,Path()],user_types: Annotated[get_teacher, Depends()]):
+async def delete_question(session: sessionDep, question_id: Annotated[int, Path()],
+                          user_types: Annotated[get_teacher, Depends()]):
     teacher_id = (user_types['teacher']).decode('utf-8')
-    selected_question = session.query(Question).filter(Question.teahcher_id==teacher_id,Question.id==question_id).first()
+    selected_question = session.query(Question).filter(Question.teacher_id == teacher_id,
+                                                       Question.id == question_id).first()
+    if not selected_question:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail='question not found')
+    question_image = selected_question.image
+    if question_image:
+        await remove_image(question_image, 'Questions')
     if selected_question.type == QUE_TYPES.test:
         selected_q_type = session.query(TestQuestion).filter(TestQuestion.question_id == question_id).first()
-    elif selected_question.type == QUE_TYPES.true_false:
-        selected_q_type = session.query(TrueFalseQuestion).filter(TestQuestion.question_id == question_id).first()
+        option_image = [selected_q_type.A_image, selected_q_type.B_image, selected_q_type.C_image,
+                        selected_q_type.D_image]
+        for img in option_image:
+            if img:
+                await remove_image(img, 'Questions')
+    elif selected_question.type == QUE_TYPES.essay:
+        selected_q_type = session.query(EssayQuestion).filter(EssayQuestion.question_id == question_id).first()
+        essay_img = selected_q_type.essay_image
+        if essay_img:
+            await remove_image(essay_img, 'Questions')
     else:
-        selected_q_type = session.query(EssayQuestion).filter(TestQuestion.question_id == question_id).first()
-    session.delete(selected_q_type)
+        selected_q_type = None
+    if selected_q_type:
+        session.delete(selected_q_type)
     session.delete(selected_question)
     session.commit()
     return JSONResponse(content={'status': 'deleted'}, status_code=status.HTTP_200_OK)
-
-
-# show questions
-    # all_questions = select(
-    #     Question.id.label('question_id'),
-    #     func.count(Question.id).label('all_question')
-    # ).group_by(Question.id).subquery()
-    #
-    # count_tq = select(
-    #     Question.id.label('question_id'),
-    #     func.count(case(Question.type==QUE_TYPES.test,Question.id),else_=0).label('count_test')
-    # ).group_by(Question.id).subquery()
-    # count_essay = select(
-    #     Question.id.label('question_id'),
-    #     func.count(case(Question.type == QUE_TYPES.essay, Question.id), else_=0).label('count_essay')
-    # ).group_by(Question.id).subquery()
-    #
-    # count_tf = select(
-    #     Question.id.label('question_id'),
-    #     func.count(case(Question.type == QUE_TYPES.true_false, Question.id), else_=0).label('count_true_false')
-    # ).group_by(Question.id).subquery()
-    #
-
-    # questions = (session.query(Question,TestQuestion,count_tq.c.count_test,count_essay.c.count_essay,count_tf.c.count_true_false)
-    #              .filter(Question.teacher_id==teacher_id)
-    #              .outerjoin(TestQuestion,TestQuestion.question_id==Question.id)
-    #              .outerjoin(count_tq,count_tq.c.question_id==Question.id)
-    #              .outerjoin(count_essay,count_essay.c.question_id==Question.id)
-    #              .outerjoin(count_tf,count_tf.c.question_id==Question.id)
-    #              )

@@ -3,14 +3,18 @@ from sys import path
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 import os
+
+from starlette.staticfiles import StaticFiles
+
 from Database.DB import create_db_table, Teacher
 from Dependencies.Redis import r
 from Routers.Teacher import Class, Questions,Exam,StudentList
+from Routers.Teacher import Exam as exam_teacher
 from Routers.Auths import MainAuth
 from Routers.Admin import Users,AllQuestions,AllPayments
 from Routers.Student import Authentication,dashboard,Exam
 from Routers.Cart import Cart
-# from Routers.Teacher import TeacherAuthentication
+from Routers.Teacher import TeacherAuthentication
 app = FastAPI()
 
 app.add_middleware(
@@ -27,8 +31,9 @@ app.include_router(MainAuth.router)
 app.include_router(Class.router)
 app.include_router(Questions.router)
 app.include_router(Exam.router)
-app.include_router(StudentList.router)
-# app.include_router(TeacherAuthentication.router)
+# app.include_router(StudentList.router)
+app.include_router(TeacherAuthentication.router)
+app.include_router(exam_teacher.router)
 
 
 # ---   Admin   ---
@@ -42,6 +47,7 @@ app.include_router(Authentication.router)
 app.include_router(dashboard.router)
 app.include_router(Exam.router)
 
+app.mount("/Questions", StaticFiles(directory="Questions"), name="Questions")
 
 # Cart
 app.include_router(Cart.router)

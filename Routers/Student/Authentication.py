@@ -8,13 +8,14 @@ from Database.DB import sessionDep, User, Student, Class, StudentClass
 from fastapi import APIRouter, HTTPException
 from fastapi.params import Path, Body, Depends
 from Dependencies.Redis import r
-# from Routers.Auths.MainAuth import authorization
-
+from Routers.Auths.MainAuth import authorization, UserCode
+from Routers.Teacher.TeacherAuthentication import check_mobile
 
 router = APIRouter(prefix='/student')
 
 class SignClassItem(BaseModel):
     mobile: str = Field(max_length=11, min_length=11,regex=r'^09[0-3,9]\d{8}$')
+
 @router.post('/class-sign/{url}')
 async def signup_class(session:sessionDep,url:Annotated[str,Path()],item:Annotated[SignClassItem,Body()]):
     class_exists = session.query(Class).filter(Class.signup_link==url).first()
@@ -26,11 +27,8 @@ async def signup_class(session:sessionDep,url:Annotated[str,Path()],item:Annotat
 
 
 
-async def get_student(session:sessionDep):
-    # payload: Annotated[authorization, Depends()],
-    # user_id = payload['user_id']
-    user_id = 1
-
+async def get_student(payload: Annotated[authorization, Depends()],session:sessionDep):
+    user_id = payload['user_id']
     get_types = r.get(f'student-types{user_id}')
     if not get_types:
         try:
@@ -63,18 +61,36 @@ class StudentInfo(BaseModel):
     mobile: str = Field(max_length=11, min_length=11, regex=r'^09[0-3,9]\d{8}$')
     email: Optional[EmailStr] = Field(None)
 
-@router.put('/info')
+
+@router.post('/info')
 async def update_student_info(session:sessionDep,get_student_type:Annotated[get_student,Depends()],item:Annotated[StudentInfo,Body()]):
     student_id = (get_student_type['student']).decode('utf-8')
-    user_id = session.query(Student).filter(Student.id==student_id).first().user_id
-    student = session.query(User).filter(User.id==user_id)
-    student_val = {
+    user_id = session.query(Student).filter(Student.id == student_id).first().user_id
+    user_val = {
         'name': item.name,
         'last_name': item.last_name,
-        'mobile': item.mobile,
-        'email':item.email
+        'email': item.email
     }
-    update_student = student.update(student_val)
+    user = session.query(User).filter(User.id==user_id)
+    user_mobile = user.first().mobile
+    is_new = await check_mobile(user_mobile,item.mobile,user_id)
+    user.update(user_val)
+    content = {'new':True if is_new else False,'mobile':item.mobile if is_new else ''}
     session.commit()
-    return JSONResponse({'status':'student updated'},status.HTTP_200_OK)
+    return JSONResponse(status_code=status.HTTP_200_OK,content=content)
+
+
+
+@router.post('/verify')
+async def change_mobile(session:sessionDep,get_student_type:Annotated[get_student,Depends()],items:Annotated[UserCode,Body()]):
+    student_id = (get_student_type['student']).decode('utf-8')
+    original_code = (r.get(f'OTP:{items.mobile}')).decode('utf-8')
+    user_id = (r.get(f'user_id:{items.mobile}')).decode('utf-8')
+    if original_code == items.code:
+        user = session.query(User).filter(User.id==user_id)
+        user.update({'mobile':items.mobile})
+        session.commit()
+        return JSONResponse(content={'change mobile':'successful'},status_code=status.HTTP_200_OK)
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST)
+
 

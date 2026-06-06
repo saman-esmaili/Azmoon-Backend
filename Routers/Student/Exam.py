@@ -1,7 +1,5 @@
 import datetime
 from typing import Annotated, Optional
-
-from certifi import where
 from fastapi import APIRouter, HTTPException
 from fastapi.params import Depends, Path, Body
 from pydantic import BaseModel, Field
@@ -13,7 +11,6 @@ from Dependencies.Calculate import calc_exam_status, calc_time
 from Database.DB import sessionDep, StudentClass, Class, Exam, StudentExam, StudentScore, Student, QuestionExam, \
     Question, TestQuestion, ORDER, ControlExam
 from Dependencies.Redis import r
-from Routers.Admin.AllQuestions import questions
 from Routers.Student.Authentication import get_student
 from task.tasks import grade_exam
 

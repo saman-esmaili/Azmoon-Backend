@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi.params import Depends
 from sqlalchemy import func, Case, select, DateTime, or_, and_
 from sqlalchemy.sql.functions import coalesce
+from starlette.responses import JSONResponse
 
 from Routers.Student.Authentication import get_student
 from fastapi import APIRouter
@@ -13,7 +14,23 @@ router = APIRouter(prefix='/student')
 @router.get('/dashboard')
 async def student_dashboard(session:sessionDep,get_type:Annotated[get_student,Depends()]):
     student_id = (get_type['student']).decode('utf-8')
-
+    res = {
+        'exam_name0': None,
+        'student_score0': 0,
+        'exam_score0': 0,
+        'exam_name1': None,
+        'student_score1': 0,
+        'exam_score1': 0,
+        'user_name': '',
+        'remain_exam': 0,
+        'exams': 0,
+        'exam_count': 0,
+        'passed_exam': 0,
+        'class_count': 0,
+        'avg_score': 0,
+        'max_score': 0,
+        'messages': 0,
+    }
     exam_count = (
         select(
             Class.id.label("class_id"),
@@ -65,20 +82,20 @@ async def student_dashboard(session:sessionDep,get_type:Annotated[get_student,De
                     .outerjoin(passed_exam,passed_exam.c.student_id==Student.id)
                     )
     last_two_results = last_two_exam_score.all()
-    res = {}
     for index,(exm,score) in enumerate(last_two_results):
         res[f'exam_name{index}'] = exm.name
+        res[f'student_score{index}'] = exm.score
         res[f'exam_score{index}'] = score.score
 
     for student_cls,student,clas,user,exam_cnt,class_cnt,avg_score,maxscore,passed_exam_c in student_info:
         res['user_name'] = f'{user.name} {user.last_name}'
         res['remain_exam'] = (exam_cnt or 0)-(passed_exam_c or 0)
         res['exams'] = exam_cnt or 0
-        res['exc'] = exam_cnt or 0
+        res['exam_count'] = exam_cnt or 0
         res['passed_exam'] = passed_exam_c or 0
         res['class_count'] = class_cnt or 0
         res['avg_score'] = avg_score or 0
         res['max_score'] = maxscore or 0
         res['messages'] = 0
 
-    return {'res':res}
+    return JSONResponse(content={'student_dash':res})
