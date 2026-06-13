@@ -46,8 +46,8 @@ async def send_otp(mobile:Annotated[MobileUser,Body()],session:sessionDep,Admin:
             code = exist_code.decode('utf-8')
         # send code by sms panel
         print(code)
-        if class_url:
-            r.setex(f'class_mobile:{mobile.mobile}',500,class_url)
+        if class_url and class_url != 'null':
+            r.setex(f'class_url:{mobile.mobile}',500,class_url)
 
         if Admin and Admin != 'null':
             await admin_user(Admin,mobile,session=session)
@@ -152,7 +152,7 @@ async def login(user_id:int,session):
         session.commit()
         mobile = user_select.mobile
         try:
-            class_id = (r.get(f'class_mobile:{mobile}')).decode('utf-8')
+            class_id = (r.get(f'class_url:{mobile}')).decode('utf-8')
             await save_class(class_id,user_id,session)
         except:
             pass

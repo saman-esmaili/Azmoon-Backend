@@ -1,165 +1,198 @@
-import datetime
-
 import jdatetime
 import sqlalchemy
-from sqlalchemy import select, Case, and_, func, join
-
-from Database.DB import QuestionExam, StudentExam, Question, TestQuestion, TrueAnswerQuestion, StudentScore
-from Dependencies.Celery import celery_app
-
+from sqlalchemy import select, case, and_, func, join
+from Database.DB import QuestionExam, StudentExam, Question, TrueAnswerQuestion, StudentScore, sessionDep, SessionLocal, \
+    QUE_TYPES
+from task.Celery import celery_app
 
 @celery_app.task
-async def grade_exam(session,student_id,exam_id):
-    question_exam = session.query(QuestionExam).subquery()
-    student_exam = session.query(StudentExam).subquery()
-    question = session.query(Question).subquery()
-    true_answer_question = session.query(TrueAnswerQuestion).subquery()
-    student_exam_ids = []
+def grade_exam(student_id: int, exam_id: int):
+    session = SessionLocal()
 
-    stmt_tf_test = (
-        select(
-            student_exam.c.id.label('student_Exam_id'),
+    try:
+        student_exam_ids = []
 
-            Case(
-                and_(
-                    question.c.type == 'true_false',
-                    func.cast(true_answer_question.c.true_answer, sqlalchemy.Boolean) == student_exam.c.answer
-                ),
-                question.c.score
-            ),
-            (
-                and_(
-                    question.c.type=='test',
-                    true_answer_question.c.true_answer==student_exam.c.answer
-                ),
-                question.c.score
-            ),
-            else_=0
-        ).label('calculated_score')
-    ).select_from(
-        join(student_exam,question_exam,student_exam.c.question_exam_id==question_exam.c.id)
-        .join(question,question.c.id==question_exam.c.question_id)
-        .outerjoin(true_answer_question,true_answer_question.c.question_id==question.c.id)
-    ).filter(
-        and_(
-            question_exam.c.exam_id == exam_id,
-            student_exam.c.student_id == student_id,
-            question.c.type.in_(['true_false', 'test'])
-        )
-    )
+        # -------------------------
+        # تصحیح تستی و صحیح/غلط
+        # -------------------------
 
-    results_tf_test = session.execute(stmt_tf_test).fetchall()
-    update_data_tf_test = []
-    for row in results_tf_test:
-        update_data_tf_test.append({"id": row.student_exam_id, "score": row.calculated_score})
-        student_exam_ids.append(row.student_exam_id)
-
-    if update_data_tf_test:
-        session.bulk_update_mappings(StudentExam, update_data_tf_test)
-
-    stmt_essay = (
-        select(StudentExam.c.id).label('student_exam_id')
-        .select_from(
-            join(StudentExam, QuestionExam, StudentExam.c.question_exam_id == QuestionExam.c.id)
-            .join(Question, Question.c.id == QuestionExam.c.question_id)
-        )
-        .filter(
-            and_(
-                QuestionExam.c.exam_id == exam_id,
-                StudentExam.c.student_id == student_id,
-                Question.c.type == 'essay',
-                StudentExam.c.score.is_(None)
+        stmt = (
+            select(
+                StudentExam.id,
+                StudentExam.answer,
+                Question.type,
+                Question.true_answer,
+                Question.score,
             )
-        )
-    )
-
-    essay_questions_to_grade = session.execute(stmt_essay).fetchall()
-    student_exam_ids.append(row[0] for row in essay_questions_to_grade)
-    if not essay_questions_to_grade:
-        sum_scores = select(
-            StudentExam,
-            func.sum(
-                Case(
-                    (StudentExam.id.in_(student_exam_ids),StudentExam.score),else_=0
+            .join(
+                QuestionExam,
+                StudentExam.question_exam_id == QuestionExam.id
+            )
+            .join(
+                Question,
+                Question.id == QuestionExam.question_id
+            )
+            .where(
+                and_(
+                    QuestionExam.exam_id == exam_id,
+                    StudentExam.student_id == student_id,
+                    Question.type.in_(["true_false", "test"])
                 )
             )
-        ).where(StudentExam.student_id==student_id)
-        get_score = session.execute(sum_scores).scalar()
-
-        count_not_answer_stmt = (
-            select(func.count(StudentExam.id).label('not_answered_count'))
-            .join(QuestionExam, StudentExam.c.question_exam_id == QuestionExam.c.id)
-            .where(and_(
-                QuestionExam.c.exam_id == exam_id,
-                StudentExam.c.student_id == student_id,
-                StudentExam.c.answer.is_(None)
-            ))
         )
-        tf_test_results_for_counting = (
+
+        rows = session.execute(stmt).all()
+
+        update_data = []
+
+        total_correct = 0
+        total_incorrect = 0
+
+        for row in rows:
+            score = 0
+
+            if row.type == QUE_TYPES.test:
+                if str(row.answer or "").strip() == str(row.true_answer).strip():
+                    score = row.score
+                    total_correct += 1
+                else:
+                    total_incorrect += 1
+
+            elif row.type == QUE_TYPES.true_false:
+                if str(row.answer or "").lower() == str(row.true_answer).lower():
+                    score = row.score
+                    total_correct += 1
+                else:
+                    total_incorrect += 1
+
+            update_data.append(
+                {
+                    "id": row.id,
+                    "score": score
+                }
+            )
+
+            student_exam_ids.append(row.id)
+
+        if update_data:
+            session.bulk_update_mappings(
+                StudentExam,
+                update_data
+            )
+
+        # -------------------------
+        # سوالات تشریحی بررسی نشده
+        # -------------------------
+
+        essay_stmt = (
+            select(StudentExam.id)
+            .join(
+                QuestionExam,
+                StudentExam.question_exam_id == QuestionExam.id
+            )
+            .join(
+                Question,
+                Question.id == QuestionExam.question_id
+            )
+            .where(
+                and_(
+                    QuestionExam.exam_id == exam_id,
+                    StudentExam.student_id == student_id,
+                    Question.type == QUE_TYPES.essay,
+                    StudentExam.score.is_(None)
+                )
+            )
+        )
+
+        essay_questions = session.execute(
+            essay_stmt
+        ).scalars().all()
+
+        student_exam_ids.extend(essay_questions)
+
+        # اگر هنوز تشریحی تصحیح نشده وجود دارد
+        if essay_questions:
+            session.commit()
+            return
+
+        # -------------------------
+        # محاسبه نمره کل
+        # -------------------------
+
+        total_score_stmt = (
             select(
                 func.coalesce(
-                    Case(
-                        [
-                            (and_(
-                                question.c.type.in_(['true_false', 'test']),
-                                true_answer_question.c.true_answer.isnot(None),
-                                func.cast(true_answer_question.c.true_answer, sqlalchemy.Boolean) == func.cast(
-                                    student_exam_alias.c.answer, sqlalchemy.Boolean)
-                            ), 1)],
-                        else_=0
-                    ),
+                    func.sum(StudentExam.score),
                     0
-                ).label('is_correct_count'),
-                func.coalesce(
-                    Case(
-                        [
-                            (and_(
-                                question.c.type.in_(['true_false', 'test']),
-                                true_answer_question.c.true_answer.isnot(None),
-                                func.cast(true_answer_question.c.true_answer, sqlalchemy.Boolean) != func.cast(
-                                    student_exam.c.answer, sqlalchemy.Boolean)
-                            ), 1)],
-                        else_=0
-                    ),
-                    0
-                ).label('is_incorrect_count')
-            ).select_from(
-                join(student_exam, question_exam, student_exam.c.question_exam_id == question_exam.c.id)
-                .join(question, question.c.id == question_exam.c.question_id)
-                .outerjoin(true_answer_question, true_answer_question.c.question_id == question.c.id)
-            ).filter(
+                )
+            )
+            .where(
+                StudentExam.student_id == student_id
+            )
+        )
+
+        total_score = session.execute(
+            total_score_stmt
+        ).scalar_one()
+
+        # -------------------------
+        # تعداد بدون پاسخ
+        # -------------------------
+
+        not_answered_stmt = (
+            select(
+                func.count(StudentExam.id)
+            )
+            .join(
+                QuestionExam,
+                StudentExam.question_exam_id == QuestionExam.id
+            )
+            .where(
                 and_(
-                    question_exam.c.exam_id == exam_id,
-                    student_exam.c.student_id == student_id,
-                    question.c.type.in_(['true_false', 'test']),
-                    student_exam.c.answer.isnot(None),  # فقط پاسخ‌هایی که داده شده‌اند
-                    student_exam.c.answer != ''
+                    QuestionExam.exam_id == exam_id,
+                    StudentExam.student_id == student_id,
+                    (
+                        StudentExam.answer.is_(None)
+                    )
                 )
             )
         )
 
-        not_answered_result = session.execute(count_not_answer_stmt).scalar()
+        not_answered = session.execute(
+            not_answered_stmt
+        ).scalar_one()
 
-        counting_results = session.execute(tf_test_results_for_counting).fetchall()
-        total_correct_count = 0
-        total_incorrect_count = 0
+        # -------------------------
+        # ثبت نتیجه
+        # -------------------------
 
-        for row in counting_results:
-            total_correct_count += row.is_correct_count
-            total_incorrect_count += row.is_incorrect_count
+        exists_score = session.execute(
+            select(StudentScore).where(
+                and_(
+                    StudentScore.student_id == student_id,
+                    StudentScore.exam_id == exam_id
+                )
+            )
+        ).scalar_one_or_none()
 
+        if not exists_score:
+            result = StudentScore(
+                student_id=student_id,
+                exam_id=exam_id,
+                score=float(total_score),
+                trues=total_correct,
+                falses=total_incorrect,
+                not_answered=not_answered,
+                date_score=jdatetime.datetime.now().date()
+            )
 
-        insert_student_score = StudentScore(
-            student_id=student_id,
-            exam_id=exam_id,
-            score=get_score,
-            date_score=jdatetime.datetime.now().date(),
-            trues=total_correct_count,
-            falses=total_incorrect_count,
-            not_answered=not_answered_result
-        )
-        session.add(insert_student_score)
+            session.add(result)
+
         session.commit()
-        session.refresh(insert_student_score)
 
-    session.commit()
+    except Exception:
+        session.rollback()
+        raise
+
+    finally:
+        session.close()

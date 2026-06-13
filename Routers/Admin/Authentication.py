@@ -1,17 +1,13 @@
 from typing import Annotated
-
 from fastapi import HTTPException
 from fastapi.params import Depends
 from starlette import status
-
 from Database.DB import sessionDep, Admin
-# from Routers.Auths.MainAuth import authorization
+from Routers.Auths.MainAuth import authorization
 from Dependencies.Redis import r
 
-async def get_admin(session:sessionDep):
-    # payload: Annotated[authorization, Depends()]
-    user_id = 2
-    # user_id = payload['user_id']
+async def get_admin(session:sessionDep,payload: Annotated[authorization, Depends()]):
+    user_id = payload['user_id']
     get_types = r.get(f'admin-types{user_id}')
     if not get_types:
         try:

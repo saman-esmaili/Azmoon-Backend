@@ -82,7 +82,7 @@ async def student_dashboard(session:sessionDep,get_type:Annotated[get_student,De
                     .outerjoin(passed_exam,passed_exam.c.student_id==Student.id)
                     )
     last_two_results = last_two_exam_score.all()
-    for index,(exm,score) in enumerate(last_two_results):
+    for index,(score,exm) in enumerate(last_two_results):
         res[f'exam_name{index}'] = exm.name
         res[f'student_score{index}'] = exm.score
         res[f'exam_score{index}'] = score.score

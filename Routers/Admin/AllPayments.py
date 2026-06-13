@@ -1,5 +1,7 @@
 import datetime
 from typing import Annotated
+
+import jdatetime
 from fastapi import APIRouter
 from fastapi.params import Depends
 from psycopg2.extensions import STATUS_IN_TRANSACTION
@@ -62,12 +64,12 @@ async def payments_info(session:sessionDep,get_user:Annotated[get_admin,Depends(
         first_month,second_month,third_month,fourth_month,five_month,six_month
     ).select_from(Transaction)
     get_income = income.one()
-    result['first'] = get_income.first_month
-    result['second'] = get_income.second_month
-    result['third'] = get_income.third_month
-    result['fourth'] = get_income.fourth_month
-    result['five'] = get_income.five_month
-    result['six'] = get_income.six_month
-
-    return JSONResponse({'payment_header':result},status_code=status.HTTP_200_OK)
+    result['month_income'] = [get_income.first_month or 0,get_income.second_month or 0,get_income.third_month or 0,get_income.fourth_month or 0,get_income.five_month or 0,get_income.six_month or 0]
+    # result['second'] = get_income.second_month
+    # result['third'] = get_income.third_month
+    # result['fourth'] = get_income.fourth_month
+    # result['five'] = get_income.five_month
+    # result['six'] = get_income.six_month
+    month_number = jdatetime.datetime.now().month
+    return JSONResponse({'payment_header':result,'month_number':month_number},status_code=status.HTTP_200_OK)
 
