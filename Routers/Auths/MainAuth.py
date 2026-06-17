@@ -13,7 +13,8 @@ from sqlalchemy import select
 from sqlmodel import Field
 from starlette import status
 from starlette.responses import JSONResponse
-from Database.DB import User, sessionDep, Teacher, Student, StudentClass, Admin, Class
+from Database.DB import User, sessionDep, Teacher, Student, StudentClass, Admin, Class, Exam, UserPlan, Plan
+from Dependencies.Calculate import calc_exam_status
 from Dependencies.Hashing import hash_token, hash_pass, verify_pass
 from Dependencies.Redis import r
 import os
@@ -261,15 +262,29 @@ async def authorization(token: Annotated[str, Depends(get_access_token)]):
 
 async def save_class(class_url,user_id,session):
     student_id = session.query(Student).filter(Student.user_id==user_id).first().id
-    class_id = session.query(Class).filter(Class.signup_link==class_url).first().id
-    student_class = StudentClass(
-        student_id=student_id,
-        class_id=class_id,
-        is_active=True
-    )
-    session.add(student_class)
-    session.commit()
-    session.refresh(student_class)
+    classs = session.query(Class).filter(Class.signup_link==class_url).first()
+    class_id = classs.id
+    teacher_id = classs.teacher_id
+    is_exist = session.query(StudentClass).filter(StudentClass.student_id==student_id,StudentClass.class_id==class_id).first()
+    if not is_exist:
+        student_class = StudentClass(
+            student_id=student_id,
+            class_id=class_id,
+            is_active=True
+        )
+        session.add(student_class)
+        session.commit()
+        session.refresh(student_class)
+
+        us,plan = (session.query(UserPlan,Plan)
+                    .filter(UserPlan.teacher_id == teacher_id, UserPlan.is_active == True)
+                    .join(Plan,Plan.id==UserPlan.plan_id)
+                    ).first()
+
+        if 0 <= classs.student_number <= plan.student_number:
+            classs.student_number += 1
+            session.commit()
+
 
 
 @router.post('/logout')
@@ -285,7 +300,7 @@ async def logout(raw_refresh:Annotated[str,Header()]):
 
 
 @router.post('/revoke')
-async def revoke(access_token: Annotated[str | None, Cookie()] = None,refresh_token: Annotated[str | None, Cookie()] = None):
+async def revoke(response:Response,access_token: Annotated[str | None, Cookie()] = None,refresh_token: Annotated[str | None, Cookie()] = None):
     hash_refresh = hash_token(refresh_token)
     user_id = r.get(hash_refresh)
     r.delete(hash_refresh)
@@ -293,4 +308,21 @@ async def revoke(access_token: Annotated[str | None, Cookie()] = None,refresh_to
     r.delete(f'teacher-types{user_id}')
     r.delete(f'admin-types{user_id}')
     r.delete(f'student-types{user_id}')
+    response.delete_cookie('access_token')
+    response.delete_cookie('refresh_token')
     return {'revoke_status':'ok'}
+
+
+@router.get('/types')
+async def get_types(session:sessionDep,refresh_token: Annotated[str | None, Cookie()] = None):
+    hash_refresh = hash_token(refresh_token)
+    user_id = (r.get(hash_refresh)).decode('utf-8')
+    result = {'student':False,'teacher':False}
+    is_teacher = session.query(Teacher).filter(Teacher.user_id==user_id).first()
+    is_student = session.query(Student).filter(Student.user_id==user_id).first()
+    if is_student:
+        result['student'] = True
+    if is_teacher:
+        result['teacher'] = True
+
+    return result

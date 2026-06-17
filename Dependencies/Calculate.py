@@ -36,4 +36,22 @@ async def calc_time(start_time,long_time):
     minute = int(result.total_seconds()/60)
     return minute,end_time
 
+def to_jalali(dt):
+    if isinstance(dt, datetime.datetime):
+        return jdatetime.datetime.fromgregorian(datetime=dt).strftime("%Y/%m/%d")
+    elif isinstance(dt, datetime.date):
+        return jdatetime.date.fromgregorian(date=dt).strftime("%Y/%m/%d")
+    return None
 
+def months_remaining(expired_date: datetime.date) -> int:
+    today = datetime.date.today()
+
+    months = (
+        (expired_date.year - today.year) * 12
+        + (expired_date.month - today.month)
+    )
+
+    if expired_date.day < today.day:
+        months -= 1
+
+    return max(months, 0)

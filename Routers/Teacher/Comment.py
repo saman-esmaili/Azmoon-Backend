@@ -1,5 +1,6 @@
 from typing import Annotated
 
+import jdatetime
 from select import select
 from sqlalchemy import func, and_
 from starlette import status
@@ -16,7 +17,7 @@ router = APIRouter(prefix='/comment')
 class CommentItem(BaseModel):
     plan_id:int
     star:float = Field(gt=0,le=5)
-    comment: str = Field(min_length=20,max_length=250)
+    comment: str = Field(min_length=2,max_length=250)
 
 @router.post('/add')
 async def add_comment(session:sessionDep,item:Annotated[CommentItem,Body()],user_types:Annotated[get_teacher,Depends()]):
@@ -25,14 +26,15 @@ async def add_comment(session:sessionDep,item:Annotated[CommentItem,Body()],user
         plan_id=item.plan_id,
         teacher_id=teacher_id,
         star=item.star,
-        comment=item.comment
+        comment=item.comment,
+        created_at=jdatetime.datetime.now().date()
     )
     session.add(comment)
     session.commit()
     session.refresh(comment)
 
 @router.get('')
-async def add_comment(session:sessionDep):
+async def comment(session:sessionDep):
     comments = (session.execute(select(Comment,Teacher,User))
                 .join(Teacher,Teacher.id==Comment.teacher_id)
                 .join(User,User.id==Teacher.user_id)
@@ -45,14 +47,14 @@ async def add_comment(session:sessionDep):
 
 
 @router.put('/{comment_id}')
-async def add_comment(session:sessionDep,item:Annotated[CommentItem,Body()],comment_id:Annotated[int,Path()],user_types:Annotated[get_teacher,Depends()]):
+async def edit_comment(session:sessionDep,item:Annotated[CommentItem,Body()],comment_id:Annotated[int,Path()],user_types:Annotated[get_teacher,Depends()]):
     teacher_id = (user_types['teacher']).decode('utf-8')
     selected_comment = (session.execute(select(Comment)
                                        .where(and_(Comment.id==comment_id)))
                         .fetchone())
     val = {
         'plan_id':item.plan_id,
-        'teacher_id':item.teacher_id,
+        'teacher_id':teacher_id,
         'comment':item.comment,
         'star':item.star,
     }
@@ -60,11 +62,24 @@ async def add_comment(session:sessionDep,item:Annotated[CommentItem,Body()],comm
     session.commit()
 
 @router.delete('/{comment_id}')
-async def add_comment(session:sessionDep,comment_id:Annotated[int,Path()],user_types:Annotated[get_teacher,Depends()]):
+async def delete_comment(session:sessionDep,comment_id:Annotated[int,Path()],user_types:Annotated[get_teacher,Depends()]):
     teacher_id = (user_types['teacher']).decode('utf-8')
     selected_comment = (session.execute(select(Comment)
-                                       .where(and_(Comment.id==comment_id)))
+                                       .where(and_(Comment.id==comment_id,Comment.teacher_id==teacher_id)))
                         .fetchone())
-    session.delete(selected_comment)
-    session.commit()
+    if selected_comment:
+        session.delete(selected_comment)
+        session.commit()
 
+@router.get('/teacher')
+async def get_teacher_comment(session:sessionDep,user_types:Annotated[get_teacher,Depends()]):
+    teacher_id = (user_types['teacher']).decode('utf-8')
+    comments = (session.query(Comment,Plan)
+                .filter(Comment.teacher_id==teacher_id)
+                .outerjoin(Plan,Plan.id == Comment.plan_id)
+                )
+    result = []
+    for comment,plan in comments:
+        result.append({'comment_id':comment.id,'plan_name':plan.name,'rating':comment.star,'comment':comment.comment,'created_at':comment.created_at})
+
+    return JSONResponse({'comment':result})

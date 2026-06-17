@@ -2,7 +2,7 @@ from datetime import date, time,datetime
 from typing import Optional, Annotated
 from fastapi.params import Depends
 from pydantic import EmailStr
-from sqlalchemy import ForeignKey, create_engine
+from sqlalchemy import ForeignKey, create_engine, Date
 from enum import Enum
 from sqlalchemy.orm import Session, sessionmaker
 from sqlmodel import SQLModel,Field
@@ -62,16 +62,14 @@ class Plan(SQLModel,table=True):
     name: str = Field(min_length=4,max_length=25)
     price: int = Field(ge=500_000)
     student_number: int = Field()
+    question_number: int = Field()
+    image_number: int = Field()
+    tagline: str = Field()
     exam_number: int = Field()
-
-class UpdatePlan(Plan):
-    name: Optional[str] = Field(min_length=4, max_length=25)
-    price: Optional[int] = Field(ge=500_000)
-    student_number: Optional[int] = Field()
-    exam_number: Optional[int] = Field()
 
 class Cart(SQLModel,table=True):
     id: int = Field(primary_key=True)
+    done: bool = Field(default=False)
     teacher_id: int = Field(ForeignKey('teacher.id'))
     plan_id: int = Field(ForeignKey('plan.id'))
 
@@ -95,12 +93,14 @@ class UpdateTransaction(Transaction):
 
 class UserPlan(SQLModel,table=True):
     id: int = Field(primary_key=True)
-    student_count: int = Field(ge=0)
     exam_count: int = Field(ge=0)
+    image_count: int = Field(ge=0)
     is_active: bool = Field()
+    expired_date: date = Field()
     transaction_id: int = Field()
-    teacher_id: int = Field(ForeignKey('teacher.id'))
-    plan_id: int = Field(ForeignKey('plan.id'))
+    teacher_id:int = Field(ForeignKey('teacher.id'))
+    plan_id:int = Field(ForeignKey('plan.id'))
+
 
 class CreateUserPlan(UserPlan):
     pass
@@ -113,8 +113,10 @@ class UpdateUserPlan(UserPlan):
 
 class Comment(SQLModel,table=True):
     id: int = Field(primary_key=True)
-    comment: str = Field(min_length=20,max_length=250)
+    comment: str = Field(min_length=2,max_length=250)
     star: float = Field(ge=0,le=5)
+    created_at: str = Field()
+    is_accept: bool = Field(False)
     teacher_id: int = Field(ForeignKey('teacher.id'))
     plan_id: int = Field(ForeignKey('plan.id'))
 
@@ -136,6 +138,7 @@ class Class(SQLModel,table=True):
     signup_link: str = Field()
     description: Optional[str] = Field(min_length=4, max_length=200)
     date: datetime = Field()
+    student_number: int = Field(0,ge=1)
     teacher_id: int = Field(ForeignKey('teacher.id'))
 
 class UpdateClass(Class):
@@ -270,18 +273,7 @@ class EssayQuestion(SQLModel,table=True):
     id: int = Field(primary_key=True)
     question_id: int = Field(ForeignKey('question.id'))
     essay_image: Optional[str] = Field(None)
-#
-# class UpdateEssayQuestion(EssayQuestion):
-#     true_answer: Optional[str] = Field(min_length=1, max_length=500)
-#
-#
-# class TrueFalseQuestion(SQLModel,table=True):
-#     id: int = Field(primary_key=True)
-#     # true_answer: bool
-#     question_id: int = Field(ForeignKey('question.id'))
-#
-# class UpdateTrueFalseQuestion(TrueFalseQuestion):
-#     true_answer: Optional[bool]
+
 
 class TrueAnswerQuestion(SQLModel,table=True):
     id: int = Field(primary_key=True)
@@ -291,9 +283,6 @@ class TrueAnswerQuestion(SQLModel,table=True):
 DATABASE_URL = "postgresql://exam:saman123@localhost:5433/Exam"
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
-# async def get_session(engine):
-#     with Session(engine) as session:
-#         yield session
 
 async def get_session():
     session = SessionLocal()

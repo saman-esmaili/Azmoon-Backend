@@ -3,7 +3,7 @@ from typing import Annotated, Optional
 from fastapi import APIRouter, HTTPException
 from fastapi.params import Depends, Path, Body
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, Case, exists
+from sqlalchemy import select, func, Case, exists, distinct
 from sqlalchemy.sql.functions import coalesce
 from starlette import status
 from starlette.responses import JSONResponse
@@ -53,22 +53,23 @@ async def get_exams(session: sessionDep, user_type: Annotated[get_student, Depen
                  .outerjoin(exam_count, exam_count.c.class_id == Class.id)
                  .outerjoin(passed_exam, passed_exam.c.student_id == student_id)
                  )
-
-    exam = (session.query(StudentClass, Class, Exam, StudentScore)
-            .filter(StudentClass.student_id == student_id)
-            .outerjoin(Class, Class.id == StudentClass.class_id)
-            .outerjoin(Exam, Exam.class_id == Class.id)
+    class_query = session.query(StudentClass).filter(StudentClass.student_id == student_id).distinct(
+        StudentClass.class_id).all()
+    classes = [c.class_id for c in class_query]
+    exam = (session.query(Exam, Class, StudentScore)
+            .filter(Exam.id.in_(classes))
+            .outerjoin(Class, Class.id == Exam.class_id)
             .outerjoin(StudentScore, (StudentScore.student_id == student_id) & (StudentScore.exam_id == Exam.id))
             .distinct(Exam.id)
             )
+
     result = {'header': {}, 'exams': []}
     for sc, cls, mean_sc, exam_cnt, passed_exm in info_exam:
         result['header']['avg_score'] = mean_sc or 0
         result['header']['exams'] = exam_cnt or 0
         result['header']['passed_exam'] = passed_exm or 0
         result['header']['remain'] = (exam_cnt or 0) - (passed_exm or 0)
-
-    for student_class, cls, exm, student_score in exam:
+    for exm, cls, student_score in exam:
         if not student_score:
             score = '-'
         else:
@@ -76,8 +77,8 @@ async def get_exams(session: sessionDep, user_type: Annotated[get_student, Depen
         get_status = calc_exam_status(exm.exam_date, exm.exam_time, exm.start_time)
         dic_res = {'exam_id': exm.id, 'exam_name': exm.name, 'exam_date': str(exm.exam_date),
                    'exam_time': exm.exam_time,
-                   'start_time': str(exm.start_time), 'class_name': cls.name, 'exam_score': exm.score,
-                   'status': get_status, 'score': score}
+                   'start_time': str(exm.start_time), 'exam_score': exm.score, 'status': get_status,
+                   'class_name': cls.name, 'score': score}
         result['exams'].append(dic_res)
 
     return JSONResponse({'exam': result}, status.HTTP_200_OK)
@@ -90,10 +91,10 @@ async def get_score(session: sessionDep, user_type: Annotated[get_student, Depen
     score_query = (session.query(StudentScore, Exam)
                    .filter(StudentScore.exam_id == exam_id,
                            StudentScore.student_id == student_id)
-                   .outerjoin(Exam,Exam.id==StudentScore.exam_id)
+                   .outerjoin(Exam, Exam.id == StudentScore.exam_id)
                    )
     result = {}
-    for score,exam in score_query:
+    for score, exam in score_query:
         if score:
             result['true'] = score.trues
             result['false'] = score.falses
@@ -112,7 +113,7 @@ async def get_review(session: sessionDep, user_type: Annotated[get_student, Depe
     result = []
     # if is_exist_score:
     question_exam = (session.query(StudentScore, QuestionExam, Question, StudentExam, TestQuestion, EssayQuestion)
-                     .filter(StudentScore.exam_id == exam_id,StudentScore.student_id==student_id)
+                     .filter(StudentScore.exam_id == exam_id, StudentScore.student_id == student_id)
                      .join(QuestionExam, StudentScore.exam_id == QuestionExam.exam_id)
                      .join(Question, Question.id == QuestionExam.question_id)
                      .join(StudentExam, StudentExam.question_exam_id == QuestionExam.id)
@@ -122,7 +123,8 @@ async def get_review(session: sessionDep, user_type: Annotated[get_student, Depe
 
     for std_sc, qe, question, std_exm, test_question, essay_question in question_exam:
         essay_correct = 0
-        dic_res = {'question': question.question, 'q_image': question.image, 'student_answer': std_exm.answer,'true_answer':question.true_answer,'type':question.type}
+        dic_res = {'question': question.question, 'q_image': question.image, 'student_answer': std_exm.answer,
+                   'true_answer': question.true_answer, 'type': question.type}
         if test_question:
             dic_res.update({'A': test_question.A, 'A_image': test_question.A_image, 'B': test_question.B,
                             'B_image': test_question.B_image,
@@ -133,7 +135,7 @@ async def get_review(session: sessionDep, user_type: Annotated[get_student, Depe
                 essay_correct = 1
             elif std_sc.score == question.score:
                 essay_correct = 2
-            dic_res.update({'essay_image': essay_question.essay_image,'essay_correct':essay_correct})
+            dic_res.update({'essay_image': essay_question.essay_image, 'essay_correct': essay_correct})
         result.append(dic_res)
 
     return JSONResponse({'exam_score': result})

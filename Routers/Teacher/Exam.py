@@ -1,16 +1,20 @@
 from datetime import date, time, datetime
 from typing import Annotated, Optional, List, ClassVar
+
+import math
 from pydantic import BaseModel
-from sqlalchemy import func, case, select, delete
+from sqlalchemy import func, case, select, delete, or_
 from sqlmodel import Field
 from starlette import status
 from starlette.responses import JSONResponse
 from Database.DB import sessionDep, ORDER, Class, Exam, QuestionExam, Question, TestQuestion, \
-    TrueAnswerQuestion, StudentExam, EssayQuestion, Student, User, StudentScore
-from fastapi.params import Depends, Body, Path
+    TrueAnswerQuestion, StudentExam, EssayQuestion, Student, User, StudentScore, UserPlan, Plan
+from fastapi.params import Depends, Body, Path, Query
 from Dependencies.Calculate import calc_exam_status
 from Routers.Teacher.TeacherAuthentication import get_teacher
 from fastapi import APIRouter, HTTPException
+
+from permissions.Teacher import plan_permit
 
 router = APIRouter(prefix='/teacher')
 
@@ -31,42 +35,72 @@ class ExamItem(BaseModel):
 async def add_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep):
     teacher_id = (user_types['teacher']).decode('utf-8')
     cls = session.query(Class).filter(Class.teacher_id == teacher_id).with_entities(Class.id, Class.name)
-    res = [{'id':c.id, 'name':c.name} for c in cls]
-    return JSONResponse({'classes': res},status_code=status.HTTP_200_OK)
+    res = [{'id': c.id, 'name': c.name} for c in cls]
+    return JSONResponse({'classes': res}, status_code=status.HTTP_200_OK)
 
 
 @router.post('/exam/add')
 async def add_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep,
                    items: Annotated[ExamItem, Body()]):
-    exam = Exam(
-        name=items.name,
-        exam_date=items.exam_date,
-        exam_time=items.exam_time,
-        start_time=items.start_time,
-        description=items.description,
-        score=items.score,
-        order_type=items.order_type,
-        class_id=items.class_id,
-    )
-    session.add(exam)
-    session.commit()
-    session.refresh(exam)
-    return JSONResponse({'status': 'exam added'}, status_code=status.HTTP_201_CREATED)
+    teacher_id = (user_types['teacher']).decode('utf-8')
+    has_permit = await plan_permit(teacher_id, session)
+    if has_permit:
+        user_plan = session.query(UserPlan).filter(UserPlan.teacher_id == teacher_id,
+                                                   UserPlan.is_active == True).first()
+        plan = session.query(Plan).filter(user_plan.plan_id == Plan.id).first()
+        if 0 <= user_plan.exam_count <= plan.exam_number:
+            exam = Exam(
+                name=items.name,
+                exam_date=items.exam_date,
+                exam_time=items.exam_time,
+                start_time=items.start_time,
+                description=items.description,
+                score=items.score,
+                order_type=items.order_type,
+                class_id=items.class_id,
+            )
+            session.add(exam)
+            session.commit()
+            session.refresh(exam)
+            user_plan.exam_count += 1
+            if user_plan.exam_count == plan.exam_number:
+                user_plan.is_active = False
+            session.commit()
+            return JSONResponse({'status': 'exam added'}, status_code=status.HTTP_201_CREATED)
+        raise HTTPException(status_code=status.HTTP_406_NOT_ACCEPTABLE)
+    raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED)
 
 
 @router.get('/exam')
-async def get_exam(session: sessionDep, user_types: Annotated[get_teacher, Depends()]):
+async def get_exam(session: sessionDep, user_types: Annotated[get_teacher, Depends()], page: int = Query(1, ge=1),
+                   size: int = Query(6, ge=1, le=100), search: str = Query()):
     teacher_id = (user_types['teacher']).decode('utf-8')
-    exams = (session.query(Exam, Class).filter(Class.teacher_id == teacher_id)
+    query = (session.query(Exam, Class).filter(Class.teacher_id == teacher_id)
              .outerjoin(Class, Exam.class_id == Class.id)
              )
+    if search:
+        search_term = f"%{search}%"
+        query = query.filter(
+            or_(
+                Exam.name.contains(search_term),
+                Class.name.contains(search_term),
+            )
+        )
+    total = query.count()
+    exams = (
+        query
+        .order_by(Exam.id.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
     result = []
     ids = set()
     for exm, cls in exams:
-        dic = {'exam_id': exm.id, 'exam_name': exm.name, 'class_name': cls.name,'class_id': cls.id,
-               'exam_date': exm.exam_date, 'exam_time': str(exm.exam_time),'score':exm.score,
-               'order_type': exm.order_type,'description':exm.description,
-               'exam_start': str(exm.start_time), 'question_selected': 0}
+        dic = {'exam_id': exm.id, 'exam_name': exm.name, 'class_name': cls.name, 'class_id': cls.id,
+               'exam_date': exm.exam_date, 'exam_time': str(exm.exam_time), 'score': exm.score,
+               'order_type': exm.order_type, 'description': exm.description,
+               'exam_start': str(exm.start_time),'question_selected':0}
         exam_status = calc_exam_status(exm.exam_date, exm.exam_time, exm.start_time)
         dic.update({'exam_status': exam_status})
         ids.add(exm.id)
@@ -82,41 +116,91 @@ async def get_exam(session: sessionDep, user_types: Annotated[get_teacher, Depen
     for (exam_id, counter) in count:
         for dics in result:
             if exam_id == dics['exam_id']:
-                dics['question_selected'] = counter
+                dics['question_selected'] += counter
                 break
-    return JSONResponse({'exams': result},status.HTTP_200_OK)
+
+    return JSONResponse({'exams': result, 'pages': math.ceil(total / size)}, status.HTTP_200_OK)
+
+
+@router.get('/exam/header')
+async def exam_header(session: sessionDep, user_types: Annotated[get_teacher, Depends()]):
+    teacher_id = (user_types['teacher']).decode('utf-8')
+    query = (session.query(Exam, Class)
+             .outerjoin(Class, Class.id == Exam.class_id)
+             .filter(Class.teacher_id == teacher_id)
+             )
+    exm_ids = set()
+    result = {}
+    result['all'] = 0
+    for exm, c in query:
+        exam_status = calc_exam_status(exm.exam_date, exm.exam_time, exm.start_time)
+        result['all'] += 1
+        if exam_status not in result.keys():
+            result[exam_status] = 0
+        result[exam_status] += 1
+        exm_ids.add(exm.id)
+    count = session.query(
+        QuestionExam.exam_id,
+        func.count(QuestionExam.id).label('count')
+    ).filter(
+        QuestionExam.exam_id.in_(exm_ids)
+    ).group_by(
+        QuestionExam.exam_id
+    ).all()
+    selected = 0
+    for (exam_id, counter) in count:
+        if exam_id in exm_ids:
+            selected += counter
+
+    try:
+        mean_used = selected // len(exm_ids)
+    except:
+        mean_used = 0
+
+    return JSONResponse({'status': result, 'mean_used': mean_used})
 
 
 @router.put('/exam/{exam_id}')
 async def edit_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep,
                     items: Annotated[ExamItem, Body()], exam_id: Annotated[int, Path()]):
     selected_exam = session.query(Exam).filter(Exam.id == exam_id)
-    exam_val = {
-        'name': items.name,
-        'exam_date': items.exam_date,
-        'exam_time': items.exam_time,
-        'start_time': items.start_time,
-        'description': items.description,
-        'score': items.score,
-        'order_type': items.order_type,
-        'class_id': items.class_id
-    }
-    update_exam = selected_exam.update(exam_val)
-    session.commit()
-    return JSONResponse({'status': 'exam updated'}, status_code=status.HTTP_200_OK)
+    exm = selected_exam.first()
+    exam_status = calc_exam_status(exm.exam_date, exm.exam_time, exm.start_time)
+    if exam_status == 'پیش رو':
+        exam_val = {
+            'name': items.name,
+            'exam_date': items.exam_date,
+            'exam_time': items.exam_time,
+            'start_time': items.start_time,
+            'description': items.description,
+            'score': items.score,
+            'order_type': items.order_type,
+            'class_id': items.class_id
+        }
+        update_exam = selected_exam.update(exam_val)
+        session.commit()
+        return JSONResponse({'status': 'exam updated'}, status_code=status.HTTP_200_OK)
 
 
 @router.delete('/exam/{exam_id}')
 async def delete_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep,
                       exam_id: Annotated[int, Path()]):
+    teacher_id = (user_types['teacher']).decode('utf-8')
+    user_plan = session.query(UserPlan).filter(UserPlan.teacher_id == teacher_id, UserPlan.is_active == True).first()
     selected_exam = session.query(Exam).filter(Exam.id == exam_id).first()
+    exam_status = calc_exam_status(selected_exam.exam_date, selected_exam.exam_time, selected_exam.start_time)
+
     selected_question_exam = session.query(QuestionExam).filter(QuestionExam.id == exam_id).delete()
     session.delete(selected_exam)
     session.commit()
+    if exam_status == 'پیش رو':
+        if user_plan:
+            user_plan.exam_count -= 1
+            session.commit()
     return JSONResponse({'status': 'exam deleted'}, status_code=status.HTTP_200_OK)
 
 
-async def add_question_exam_diff(session,exam_id,q_ids):
+async def add_question_exam_diff(session, exam_id, q_ids):
     question_exam_list = [
         QuestionExam(
             exam_id=exam_id,
@@ -126,24 +210,34 @@ async def add_question_exam_diff(session,exam_id,q_ids):
     session.add_all(question_exam_list)
     session.commit()
 
-async def remove_question_exam_diff(session,exam_id,q_ids):
+
+async def remove_question_exam_diff(session, exam_id, q_ids):
     session.execute(
         delete(QuestionExam).where(
-            QuestionExam.exam_id==exam_id,
+            QuestionExam.exam_id == exam_id,
             QuestionExam.question_id.in_(q_ids)
         )
     )
     session.commit()
 
+
 class QuestionExamItem(BaseModel):
     question_id: List[int]
+
 
 @router.post('/exam/question/add/{exam_id}')
 async def add_question_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep,
                             exam_id: Annotated[int, Path()], items: Annotated[QuestionExamItem, Body()]):
     teacher_id = (user_types['teacher']).decode('utf-8')
+    user_plan = session.query(UserPlan).filter(UserPlan.teacher_id == teacher_id).order_by(UserPlan.id.desc()).first()
+    plan_id = user_plan.plan_id
+    plan = session.query(Plan).filter(Plan.id == plan_id).first()
+    question_number = plan.question_number
+    length_selected_q = len(items.question_id)
+    if length_selected_q > question_number:
+        raise HTTPException(status_code=status.HTTP_406_NOT_ACCEPTABLE)
     qe_list = (session.query(QuestionExam)
-               .filter(QuestionExam.exam_id==exam_id)
+               .filter(QuestionExam.exam_id == exam_id)
                .with_entities(QuestionExam.question_id)
                )
     past_q = {q[0] for q in qe_list}
@@ -152,9 +246,9 @@ async def add_question_exam(user_types: Annotated[get_teacher, Depends()], sessi
         remove = past_q.difference(items.question_id)
         add = set_question_id.difference(past_q)
         if remove:
-            await remove_question_exam_diff(session,exam_id,remove)
+            await remove_question_exam_diff(session, exam_id, remove)
         if add:
-            await add_question_exam_diff(session,exam_id,add)
+            await add_question_exam_diff(session, exam_id, add)
     else:
         question_exam_list = [
             QuestionExam(
@@ -179,9 +273,23 @@ async def add_question_exam(user_types: Annotated[get_teacher, Depends()], sessi
 
 
 @router.get('/exam/question/{exam_id}')
-async def get_question_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep,
-                            exam_id: Annotated[int, Path()]):
+async def get_question_exam(
+        user_types: Annotated[get_teacher, Depends()],
+        session: sessionDep,
+        exam_id: Annotated[int, Path()],
+        page: int = Query(1, ge=1),
+        size: int = Query(10, ge=1, le=100),
+        search: str = Query(""),
+        difficulty: str = Query(""),
+        type: str = Query(""),
+        category: str = Query(""),
+):
     teacher_id = (user_types['teacher']).decode('utf-8')
+
+    diff_list = [d for d in difficulty.split(',') if d]
+    type_list = [t for t in type.split(',') if t]
+    cat_list = [c for c in category.split(',') if c]
+
     sub_query = session.query(
         QuestionExam.question_id,
         case(
@@ -190,106 +298,199 @@ async def get_question_exam(user_types: Annotated[get_teacher, Depends()], sessi
         ).label('is_selected')
     ).subquery()
 
-    selected_items_query = (session.query(
-        Question,
-        TestQuestion,
-        EssayQuestion,
+    base_query = (session.query(
+        Question, TestQuestion, EssayQuestion,
         func.coalesce(sub_query.c.is_selected, False).label('selected'),
     )
-                            .filter(Question.teacher_id == teacher_id)
-                            .outerjoin(TestQuestion, TestQuestion.question_id == Question.id)
-                            .outerjoin(EssayQuestion, EssayQuestion.question_id == Question.id)
-                            .join(sub_query, Question.id == sub_query.c.question_id, isouter=True)
-                            )
-    exm,cls = (session.query(Exam,Class).filter(Exam.id==exam_id)
-            .join(Class,Class.id==Exam.class_id)
-           ).first()
-    exam_info = {'name':exm.name,'class':cls.name,'duration':exm.exam_time,
-                  'score':exm.score}
+                  .filter(Question.teacher_id == teacher_id)
+                  .outerjoin(TestQuestion, TestQuestion.question_id == Question.id)
+                  .outerjoin(EssayQuestion, EssayQuestion.question_id == Question.id)
+                  .join(sub_query, Question.id == sub_query.c.question_id, isouter=True)
+                  )
 
+    if search:
+        base_query = base_query.filter(Question.question.ilike(f"%{search}%"))
+    if diff_list:
+        base_query = base_query.filter(Question.difficulty.in_(diff_list))
+    if type_list:
+        base_query = base_query.filter(Question.type.in_(type_list))
+    if cat_list:
+        base_query = base_query.filter(Question.category.in_(cat_list))
 
-    result = []
-    ids = set()
-    for q, tq, eq,selected in selected_items_query:
-        dic_res = {'id': q.id, 'text': q.question,'question_image':q.image, 'score': q.score, 'cat': q.category,
-                   'diff': q.difficulty, 'selected': selected,'true_answer': q.true_answer,'type':q.type}
+    total = base_query.count()
+
+    cat_rows = (session.query(Question.category, func.count(Question.id))
+                .filter(Question.teacher_id == teacher_id)
+                .group_by(Question.category)
+                .all())
+    categories = {c: cnt for c, cnt in cat_rows}
+
+    exm, cls = (session.query(Exam, Class).filter(Exam.id == exam_id)
+                .join(Class, Class.id == Exam.class_id)
+                ).first()
+    exam_info = {'name': exm.name, 'class': cls.name, 'duration': exm.exam_time, 'score': exm.score}
+
+    rows = (base_query.order_by(Question.id)
+            .offset((page - 1) * size)
+            .limit(size)
+            .all())
+
+    def serialize(q, tq, eq, selected=False):
+        dic_res = {'id': q.id, 'text': q.question, 'question_image': q.image, 'score': q.score,
+                   'cat': q.category, 'diff': q.difficulty, 'selected': selected,
+                   'true_answer': q.true_answer, 'type': q.type}
         if tq:
-            dic_res.update({'A': tq.A, 'B': tq.B, 'C': tq.C, 'D': tq.D,'A_image':tq.A_image,'B_image':tq.B_image,'C_image':tq.C_image,'D_image':tq.D_image })
+            dic_res.update({'A': tq.A, 'B': tq.B, 'C': tq.C, 'D': tq.D,
+                            'A_image': tq.A_image, 'B_image': tq.B_image,
+                            'C_image': tq.C_image, 'D_image': tq.D_image})
         elif eq:
-            dic_res.update({'essay_image':eq.essay_image})
-        result.append(dic_res)
-        ids.add(q.id)
+            dic_res.update({'essay_image': eq.essay_image})
+        return dic_res
 
-    return JSONResponse({'questions': result,'exam_info':exam_info},status.HTTP_200_OK)
+    result = [serialize(q, tq, eq, sel) for q, tq, eq, sel in rows]
+
+    # تمام سوالات انتخاب‌شده‌ی این آزمون، مستقل از صفحه‌بندی/فیلتر
+    selected_rows = (session.query(Question, TestQuestion, EssayQuestion)
+                     .join(QuestionExam, QuestionExam.question_id == Question.id)
+                     .filter(QuestionExam.exam_id == exam_id)
+                     .outerjoin(TestQuestion, TestQuestion.question_id == Question.id)
+                     .outerjoin(EssayQuestion, EssayQuestion.question_id == Question.id)
+                     .all())
+    selected_questions = [serialize(q, tq, eq, True) for q, tq, eq in selected_rows]
+
+    return JSONResponse({
+        'questions': result,
+        'exam_info': exam_info,
+        'total': total,
+        'categories': categories,
+        'selected_questions': selected_questions,
+    }, status.HTTP_200_OK)
+
+
+# @router.get('/exam/question/{exam_id}')
+# async def get_question_exam(user_types: Annotated[get_teacher, Depends()], session: sessionDep,
+#                             exam_id: Annotated[int, Path()]):
+#     teacher_id = (user_types['teacher']).decode('utf-8')
+#     sub_query = session.query(
+#         QuestionExam.question_id,
+#         case(
+#             (QuestionExam.exam_id == exam_id, True),
+#             else_=False
+#         ).label('is_selected')
+#     ).subquery()
+#
+#     selected_items_query = (session.query(
+#         Question,
+#         TestQuestion,
+#         EssayQuestion,
+#         func.coalesce(sub_query.c.is_selected, False).label('selected'),
+#     )
+#                             .filter(Question.teacher_id == teacher_id)
+#                             .outerjoin(TestQuestion, TestQuestion.question_id == Question.id)
+#                             .outerjoin(EssayQuestion, EssayQuestion.question_id == Question.id)
+#                             .join(sub_query, Question.id == sub_query.c.question_id, isouter=True)
+#                             )
+#     exm,cls = (session.query(Exam,Class).filter(Exam.id==exam_id)
+#             .join(Class,Class.id==Exam.class_id)
+#            ).first()
+#     exam_info = {'name':exm.name,'class':cls.name,'duration':exm.exam_time,
+#                   'score':exm.score}
+#
+#
+#     result = []
+#     ids = set()
+#     for q, tq, eq,selected in selected_items_query:
+#         dic_res = {'id': q.id, 'text': q.question,'question_image':q.image, 'score': q.score, 'cat': q.category,
+#                    'diff': q.difficulty, 'selected': selected,'true_answer': q.true_answer,'type':q.type}
+#         if tq:
+#             dic_res.update({'A': tq.A, 'B': tq.B, 'C': tq.C, 'D': tq.D,'A_image':tq.A_image,'B_image':tq.B_image,'C_image':tq.C_image,'D_image':tq.D_image })
+#         elif eq:
+#             dic_res.update({'essay_image':eq.essay_image})
+#         result.append(dic_res)
+#         ids.add(q.id)
+#
+#     return JSONResponse({'questions': result,'exam_info':exam_info},status.HTTP_200_OK)
 
 
 @router.get('/exam/students/{exam_id}')
-async def get_student_exam(session:sessionDep,exam_id:Annotated[int,Path()],user_types: Annotated[get_teacher, Depends()]):
-    get_question = (session.query(QuestionExam,Question,TestQuestion,EssayQuestion)
-                    .filter(QuestionExam.exam_id==exam_id)
-                    .outerjoin(Question,Question.id==QuestionExam.question_id)
-                    .outerjoin(TestQuestion,TestQuestion.question_id==Question.id)
-                    .outerjoin(EssayQuestion,EssayQuestion.question_id==Question.id)
+async def get_student_exam(session: sessionDep, exam_id: Annotated[int, Path()],
+                           user_types: Annotated[get_teacher, Depends()]):
+    get_question = (session.query(QuestionExam, Question, TestQuestion, EssayQuestion)
+                    .filter(QuestionExam.exam_id == exam_id)
+                    .outerjoin(Question, Question.id == QuestionExam.question_id)
+                    .outerjoin(TestQuestion, TestQuestion.question_id == Question.id)
+                    .outerjoin(EssayQuestion, EssayQuestion.question_id == Question.id)
                     )
-    get_exam,get_class = (session.query(Exam,Class)
-                .filter(Exam.id==exam_id)
-                .join(Class,Class.id==Exam.class_id)
-                ).first()
-    get_students = (session.query(QuestionExam,StudentExam,Student,User)
-                    .filter(QuestionExam.exam_id==exam_id)
-                    .outerjoin(StudentExam,StudentExam.question_exam_id==QuestionExam.id)
-                    .outerjoin(Student,Student.id==StudentExam.student_id)
-                    .join(User,User.id==Student.user_id)
+    get_exam, get_class = (session.query(Exam, Class)
+                           .filter(Exam.id == exam_id)
+                           .join(Class, Class.id == Exam.class_id)
+                           ).first()
+    get_students = (session.query(QuestionExam, StudentExam, Student, User)
+                    .filter(QuestionExam.exam_id == exam_id)
+                    .outerjoin(StudentExam, StudentExam.question_exam_id == QuestionExam.id)
+                    .outerjoin(Student, Student.id == StudentExam.student_id)
+                    .join(User, User.id == Student.user_id)
                     ).distinct(Student.id)
     questions = []
-    for qe,q,tq,eq in get_question:
-        dic = {'question_exam_id':qe.id,'id':q.id,'type':q.type,'text':q.question,'maxScore':q.score,
-                          'question_image':q.image,'true_answer':q.true_answer}
+    for qe, q, tq, eq in get_question:
+        dic = {'question_exam_id': qe.id, 'id': q.id, 'type': q.type, 'text': q.question, 'maxScore': q.score,
+               'question_image': q.image, 'true_answer': q.true_answer}
         if tq:
-            dic.update({'A':tq.A,'B':tq.B,'C':tq.C,'D':tq.D,'A_image':tq.A_image,'B_image':tq.B_image,'C_image':tq.C_image,'D_image':tq.D_image})
+            dic.update({'A': tq.A, 'B': tq.B, 'C': tq.C, 'D': tq.D, 'A_image': tq.A_image, 'B_image': tq.B_image,
+                        'C_image': tq.C_image, 'D_image': tq.D_image})
         elif eq:
-            dic.update({'essay_image':eq.essay_image})
+            dic.update({'essay_image': eq.essay_image})
         questions.append(dic)
 
-    exam = {'id':get_exam.id,'name':get_exam.name,'class':get_class.name,'date':get_exam.exam_date,'totalScore':get_exam.score}
+    exam = {'id': get_exam.id, 'name': get_exam.name, 'class': get_class.name, 'date': get_exam.exam_date,
+            'totalScore': get_exam.score}
 
     students = []
-    for qe,se,s,u in get_students:
-        dic = {'id':s.id,'name':f'{u.name} {u.last_name}'}
+    for qe, se, s, u in get_students:
+        dic = {'id': s.id, 'name': f'{u.name} {u.last_name}'}
         students.append(dic)
 
-    return JSONResponse(content={'questions':questions,'exam':exam,'students':students})
+    return JSONResponse(content={'questions': questions, 'exam': exam, 'students': students})
+
 
 @router.get('/exam/answers/{exam_id}/{student_id}')
-async def get_exam_correction(session:sessionDep,exam_id:Annotated[int,Path()],student_id:Annotated[int,Path()],user_types: Annotated[get_teacher, Depends()]):
-    student_answer = (session.query(QuestionExam,StudentExam,Question)
-                      .filter(QuestionExam.exam_id==exam_id)
-                      .outerjoin(StudentExam,StudentExam.question_exam_id==QuestionExam.id)
-                      .filter(StudentExam.student_id==student_id)
-                      .outerjoin(Question,Question.id==QuestionExam.question_id)
+async def get_exam_correction(session: sessionDep, exam_id: Annotated[int, Path()], student_id: Annotated[int, Path()],
+                              user_types: Annotated[get_teacher, Depends()]):
+    student_answer = (session.query(QuestionExam, StudentExam, Question)
+                      .filter(QuestionExam.exam_id == exam_id)
+                      .outerjoin(StudentExam, StudentExam.question_exam_id == QuestionExam.id)
+                      .filter(StudentExam.student_id == student_id)
+                      .outerjoin(Question, Question.id == QuestionExam.question_id)
                       )
     result = []
-    for qe,se,q in student_answer:
-        dic = {'value':se.answer,'qId':q.id,'qeId':qe.id}
+    for qe, se, q in student_answer:
+        dic = {'value': se.answer, 'qId': q.id, 'qeId': qe.id}
         result.append(dic)
-    return JSONResponse(content={'student_id':student_id,'student_answer':result})
+    return JSONResponse(content={'student_id': student_id, 'student_answer': result})
 
 
 class QuestionGrade(BaseModel):
     question_exam_id: int
     score: float
+
+
 class QSTAT(BaseModel):
-    correct:int
-    wrong:int
-    answered:int
-    unanswered:int
+    correct: int
+    wrong: int
+    answered: int
+    unanswered: int
+
+
 class GradingInfo(BaseModel):
     student_id: int
     total_score: float
     questions: list[QuestionGrade]
     stats: QSTAT
+
+
 @router.post('/exam/grade/{exam_id}')
-async def grading(session:sessionDep,exam_id:Annotated[int,Path()],data:Annotated[GradingInfo,Body()],user_types: Annotated[get_teacher, Depends()]):
+async def grading(session: sessionDep, exam_id: Annotated[int, Path()], data: Annotated[GradingInfo, Body()],
+                  user_types: Annotated[get_teacher, Depends()]):
     if data.questions:
         for item in data.questions:
             session.query(StudentExam).filter(
@@ -300,7 +501,8 @@ async def grading(session:sessionDep,exam_id:Annotated[int,Path()],data:Annotate
             })
         session.commit()
 
-        student_score = session.query(StudentScore).filter(StudentScore.student_id==data.student_id,StudentScore.exam_id==exam_id).first()
+        student_score = session.query(StudentScore).filter(StudentScore.student_id == data.student_id,
+                                                           StudentScore.exam_id == exam_id).first()
         if not student_score:
             create_ss = StudentScore(
                 student_id=data.student_id,
@@ -322,4 +524,4 @@ async def grading(session:sessionDep,exam_id:Annotated[int,Path()],data:Annotate
             student_score.not_answered = data.stats.unanswered
 
             session.commit()
-    return JSONResponse({'grading':'done'})
+    return JSONResponse({'grading': 'done'})
