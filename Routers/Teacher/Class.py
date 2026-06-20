@@ -34,7 +34,7 @@ async def add_class(cls_items: Annotated[ClsItem, Body()], user_types: Annotated
     has_permit = await plan_permit(teacher_id, session)
     if not has_permit:
         raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED)
-    link = await generate_link(session)
+    link = await generate_link(session,teacher_id)
     name_is_exist = session.scalar(
         select(exists().where((Class.teacher_id == teacher_id) & (Class.name == cls_items.name)))
     )

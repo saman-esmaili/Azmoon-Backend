@@ -12,7 +12,7 @@ from Routers.Teacher import Class, Questions, Exam, StudentList, Myplan, Transac
 from Routers.Teacher import Exam as exam_teacher
 from Routers.Auths import MainAuth
 from Routers.Admin import Users,AllQuestions,AllPayments
-from Routers.Student import Authentication,dashboard,Exam
+from Routers.Student import Authentication, dashboard, Exam, Class
 from Routers.Cart import Cart
 from Routers.Teacher import TeacherAuthentication
 from Routers.Landing import landing
@@ -50,6 +50,7 @@ app.include_router(AllPayments.router)
 app.include_router(Authentication.router)
 app.include_router(dashboard.router)
 app.include_router(Exam.router)
+app.include_router(Class.router)
 
 
 app.mount("/Questions", StaticFiles(directory="Questions"), name="Questions")

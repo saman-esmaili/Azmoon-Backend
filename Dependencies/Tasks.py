@@ -6,10 +6,11 @@ from Database.DB import Class
 import jdatetime
 auth_scheme = HTTPBearer()
 
-async def generate_link(session):
+async def generate_link(session,teacher_id):
     chars = string.ascii_letters + string.digits
+    date = str(jdatetime.datetime.now().timestamp())[-5:]
     while True:
-        random_str = ''.join(random.choice(chars) for _ in range(15))
+        random_str = f'{teacher_id}{date}'.join(random.choice(chars) for _ in range(15))
         is_exist = session.scalar(
             select(exists().where(Class.signup_link==random_str))
         )

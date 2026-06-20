@@ -1,7 +1,8 @@
 import datetime
+from math import ceil
 from typing import Annotated, Optional
 from fastapi import APIRouter, HTTPException
-from fastapi.params import Depends, Path, Body
+from fastapi.params import Depends, Path, Body, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func, Case, exists, distinct
 from sqlalchemy.sql.functions import coalesce
@@ -18,7 +19,7 @@ router = APIRouter(prefix='/student/exam')
 
 
 @router.get('')
-async def get_exams(session: sessionDep, user_type: Annotated[get_student, Depends()]):
+async def get_exams(session: sessionDep, user_type: Annotated[get_student, Depends()], page: int = Query(1, ge=1), size: int = Query(10, ge=1, le=100),):
     student_id = (user_type['student']).decode('utf-8')
 
     mean_score = select(
@@ -56,19 +57,26 @@ async def get_exams(session: sessionDep, user_type: Annotated[get_student, Depen
     class_query = session.query(StudentClass).filter(StudentClass.student_id == student_id).distinct(
         StudentClass.class_id).all()
     classes = [c.class_id for c in class_query]
-    exam = (session.query(Exam, Class, StudentScore)
-            .filter(Exam.id.in_(classes))
+    query = (session.query(Exam, Class, StudentScore)
+            .filter(Exam.class_id.in_(classes))
             .outerjoin(Class, Class.id == Exam.class_id)
             .outerjoin(StudentScore, (StudentScore.student_id == student_id) & (StudentScore.exam_id == Exam.id))
             .distinct(Exam.id)
             )
-
+    total = query.count()
+    exam = (
+        query
+        .order_by(Exam.id.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
     result = {'header': {}, 'exams': []}
     for sc, cls, mean_sc, exam_cnt, passed_exm in info_exam:
         result['header']['avg_score'] = mean_sc or 0
-        result['header']['exams'] = exam_cnt or 0
-        result['header']['passed_exam'] = passed_exm or 0
-        result['header']['remain'] = (exam_cnt or 0) - (passed_exm or 0)
+        # result['header']['exams'] = exam_cnt or 0
+        # result['header']['passed_exam'] = passed_exm or 0
+        # result['header']['remain'] = (exam_cnt or 0) - (passed_exm or 0)
     for exm, cls, student_score in exam:
         if not student_score:
             score = '-'
@@ -81,7 +89,7 @@ async def get_exams(session: sessionDep, user_type: Annotated[get_student, Depen
                    'class_name': cls.name, 'score': score}
         result['exams'].append(dic_res)
 
-    return JSONResponse({'exam': result}, status.HTTP_200_OK)
+    return JSONResponse({'exam': result,'pages': ceil(total / size) if total else 1}, status.HTTP_200_OK)
 
 
 @router.get('/score/{exam_id}')

@@ -1,32 +1,53 @@
 import datetime
+from math import ceil
 from typing import Annotated
 
 import jdatetime
 from fastapi import APIRouter
-from fastapi.params import Depends
+from fastapi.params import Depends, Query
 from psycopg2.extensions import STATUS_IN_TRANSACTION
-from sqlalchemy import func, Case
+from sqlalchemy import func, Case, or_
 from sqlalchemy.sql.functions import coalesce
 from starlette import status
 from starlette.responses import JSONResponse
 
-from Database.DB import sessionDep, Transaction, Cart, User, Plan, STATUS_TARANS
+from Database.DB import sessionDep, Transaction, Cart, User, Plan, STATUS_TARANS, Teacher
 from Routers.Admin.Authentication import get_admin
 
 router = APIRouter(prefix='/admin')
 
 @router.get('/payments')
-async def payments(session:sessionDep,get_user:Annotated[get_admin,Depends()]):
-    transaction = (session.query(Transaction,Cart,User,Plan)
+async def payments(session:sessionDep,get_user:Annotated[get_admin,Depends()], page: int = Query(1, ge=1),
+                    size: int = Query(10, ge=1, le=100), search: str = Query()):
+    query = (session.query(Transaction,Cart,Teacher,User,Plan)
                    .outerjoin(Cart,Cart.id==Transaction.cart_id)
-                   .outerjoin(User,Cart.user_id==User.id)
+                   .outerjoin(Teacher,Cart.teacher_id==Teacher.id)
+                   .outerjoin(User,User.id==Teacher.user_id)
                    .outerjoin(Plan,Cart.plan_id==Plan.id)
                    )
+    total = query.count()
+    if search:
+        search_term = f'%{search}%'
+        query = query.filter(
+            or_(
+                Transaction.trans_id.contains(search_term),
+                Plan.name.contains(search_term),
+                (User.name + ' ' + User.last_name).contains(search_term),
+            )
+        )
+    transaction = (
+        query
+        .order_by(Transaction.id.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+    pages = ceil(total / size)
     result = []
-    for trans,cart,user,plan in transaction:
+    for trans,cart,teacher,user,plan in transaction:
         dic_res = {'id':trans.id,'trans_id':trans.trans_id,'status':trans.status,'payment_date':str(trans.payment_date),"price":trans.price,'gateway':trans.payment_gateway,'user_name':f'{user.name} {user.last_name}','plan':plan.name}
         result.append(dic_res)
-    return JSONResponse({'transactions':result},status_code=status.HTTP_200_OK)
+    return JSONResponse({'transactions':result,'pages':pages},status_code=status.HTTP_200_OK)
 
 
 @router.get('/payments-info')
@@ -44,8 +65,8 @@ async def payments_info(session:sessionDep,get_user:Annotated[get_admin,Depends(
     get_info = transactions.one()
     result = {'all':0}
     result['price'] = get_info.price
-    result['incomplete'] = get_info.complete
-    result['complete'] = get_info.incomplete
+    result['incomplete'] = get_info.incomplete
+    result['complete'] = get_info.complete
     result['all'] = get_info.complete + get_info.incomplete
 
     # diagram
@@ -65,11 +86,6 @@ async def payments_info(session:sessionDep,get_user:Annotated[get_admin,Depends(
     ).select_from(Transaction)
     get_income = income.one()
     result['month_income'] = [get_income.first_month or 0,get_income.second_month or 0,get_income.third_month or 0,get_income.fourth_month or 0,get_income.five_month or 0,get_income.six_month or 0]
-    # result['second'] = get_income.second_month
-    # result['third'] = get_income.third_month
-    # result['fourth'] = get_income.fourth_month
-    # result['five'] = get_income.five_month
-    # result['six'] = get_income.six_month
     month_number = jdatetime.datetime.now().month
     return JSONResponse({'payment_header':result,'month_number':month_number},status_code=status.HTTP_200_OK)
 

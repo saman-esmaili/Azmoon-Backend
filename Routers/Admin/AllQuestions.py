@@ -1,8 +1,9 @@
+from math import ceil
 from typing import Annotated
 
 from fastapi import APIRouter
-from fastapi.params import Depends
-from sqlalchemy import Case, func
+from fastapi.params import Depends, Query
+from sqlalchemy import Case, func, or_
 from starlette.responses import JSONResponse
 
 from Database.DB import sessionDep, Question, TestQuestion, EssayQuestion, QUE_TYPES
@@ -11,11 +12,30 @@ from Routers.Admin.Authentication import get_admin
 router = APIRouter(prefix='/admin')
 
 @router.get('/questions/')
-async def questions(session:sessionDep,get_user:Annotated[get_admin,Depends()]):
-    questions = (session.query(Question, TestQuestion, EssayQuestion)
+async def questions(session:sessionDep,get_user:Annotated[get_admin,Depends()], page: int = Query(1, ge=1),
+                    size: int = Query(10, ge=1, le=100), search: str = Query()):
+    query = (session.query(Question, TestQuestion, EssayQuestion)
                  .outerjoin(TestQuestion, TestQuestion.question_id == Question.id)
                  .outerjoin(EssayQuestion, EssayQuestion.question_id == Question.id)
                  )
+    total = query.count()
+    if search:
+        search_term = f'%{search}%'
+        query = query.filter(
+            or_(
+                Question.question.contains(search_term),
+                Question.true_answer.contains(search_term),
+                Question.category.contains(search_term),
+            )
+        )
+    questions = (
+        query
+        .order_by(Question.id.desc())
+        .offset((page - 1) * size)
+        .limit(size)
+        .all()
+    )
+    pages = ceil(total / size)
     result = []
     for q, tq, eq in questions:
         dic_res = {'id': q.id, 'text': q.question,'question_image':q.image, 'score': q.score, 'cat': q.category,
@@ -27,7 +47,7 @@ async def questions(session:sessionDep,get_user:Annotated[get_admin,Depends()]):
         elif eq:
             dic_res.update({'essay_image': eq.essay_image})
         result.append(dic_res)
-    return JSONResponse(content={'result':result})
+    return JSONResponse(content={'result':result,'pages':pages})
 #
 # @router.get('/questions-info')
 # async def questions_info(session:sessionDep,get_user:Annotated[get_admin,Depends()]):

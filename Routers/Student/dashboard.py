@@ -45,41 +45,24 @@ async def student_dashboard(session:sessionDep,get_type:Annotated[get_student,De
         StudentClass.id.label('StudentClass_id'),
         func.count(StudentClass.class_id).label('class_count')
     ).group_by(StudentClass.id).subquery()
-
-    mean_score = select(
+    calc_max = select(
         StudentScore.student_id.label('student_id'),
-        func.avg(coalesce(
-            Case((StudentScore.exam_id==Exam.id,StudentScore.score),else_=0),
-            0
-        )).label('mean_score')
+        func.max(StudentScore.score).label('maximum')
     ).group_by(StudentScore.student_id).subquery()
-
-    max_score = select(
-        StudentScore.student_id.label('student_id'),
-        func.max(StudentScore.score).label('max_score')
-    ).group_by(StudentScore.student_id).subquery()
-
-    passed_exam = select(
-        StudentExam.student_id.label('student_id'),
-        func.count(Case((Student.id==StudentExam.student_id,StudentExam.student_id),else_=0),distinct=True).label('passed_exam_count')
-    ).group_by(StudentExam.student_id).subquery()
-
     last_two_exam_score = (session.query(StudentScore,Exam)
                            .filter(StudentScore.student_id==student_id)
                            .join(Exam,Exam.id==StudentScore.exam_id)
                            ).order_by('date_score').limit(2)
 
-    student_info = (session.query(StudentClass,Student,Class,User,exam_count.c.exam_count,class_count.c.class_count,
-                                  mean_score.c.mean_score,max_score.c.max_score,passed_exam.c.passed_exam_count)
+    student_info = (session.query(StudentClass,Student,Class,User,class_count.c.class_count,
+                                  calc_max.c.maximum)
                     .filter(StudentClass.student_id==student_id)
+                    .join(Student,Student.id==StudentClass.student_id)
                     .join(Class, StudentClass.class_id == Class.id)
-                    .join(Student,StudentClass.student_id==student_id)
                     .join(User,User.id==Student.user_id)
                     .outerjoin(exam_count,exam_count.c.class_id==Class.id)
                     .outerjoin(class_count,class_count.c.StudentClass_id==StudentClass.id)
-                    .outerjoin(mean_score,mean_score.c.student_id==Student.id)
-                    .outerjoin(max_score,max_score.c.student_id==Student.id)
-                    .outerjoin(passed_exam,passed_exam.c.student_id==Student.id)
+                    .outerjoin(calc_max,calc_max.c.student_id==Student.id)
                     )
     last_two_results = last_two_exam_score.all()
     for index,(score,exm) in enumerate(last_two_results):
@@ -87,15 +70,9 @@ async def student_dashboard(session:sessionDep,get_type:Annotated[get_student,De
         res[f'student_score{index}'] = exm.score
         res[f'exam_score{index}'] = score.score
 
-    for student_cls,student,clas,user,exam_cnt,class_cnt,avg_score,maxscore,passed_exam_c in student_info:
+    for student_cls,student,clas,user,class_cnt,Mscore in student_info:
         res['user_name'] = f'{user.name} {user.last_name}'
-        res['remain_exam'] = (exam_cnt or 0)-(passed_exam_c or 0)
-        res['exams'] = exam_cnt or 0
-        res['exam_count'] = exam_cnt or 0
-        res['passed_exam'] = passed_exam_c or 0
         res['class_count'] = class_cnt or 0
-        res['avg_score'] = avg_score or 0
-        res['max_score'] = maxscore or 0
-        res['messages'] = 0
+        res['max_score'] = Mscore or 0
 
     return JSONResponse(content={'student_dash':res})
